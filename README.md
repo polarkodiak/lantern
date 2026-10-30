@@ -59,3 +59,15 @@ only in a public repository. If the repository is public:
   all outside contributors.
 - The monthly `keepalive` job commits a dated file so GitHub doesn't switch
   off the schedule after 60 days without a commit.
+
+## Recommended repository settings
+
+- **Advanced Security:** Dependabot alerts, malware alerts and security
+  updates on; secret scanning and push protection on; CodeQL default setup
+  (Extended queries, remote and local sources). Leave Dependabot version
+  updates and private vulnerability reporting off.
+- **Actions → General:** allow only actions created by GitHub, require actions
+  to be pinned to a full-length commit SHA, and keep workflow permissions
+  read-only without permission to create pull requests.
+- **Rules:** a ruleset on all branches that restricts deletions and blocks
+  force pushes, with only the repository admin allowed to bypass.
