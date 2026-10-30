@@ -39,6 +39,16 @@ reversed without `STATE_KEY`.
    or a notification was not delivered. GitHub emails you about failed
    scheduled runs.
 
+## Updating Playwright
+
+`requirements.txt` pins every package to exact SHA-256 checksums. To update,
+change the version in `requirements.in`, then regenerate with Python 3.13:
+
+```
+pip install pip-tools
+pip-compile --generate-hashes --no-strip-extras --output-file=requirements.txt requirements.in
+```
+
 ## Public repository
 
 Every-10-minute checks need about 4,300 Actions minutes a month, which is free

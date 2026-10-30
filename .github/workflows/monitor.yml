@@ -30,7 +30,11 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        run: python -m pip install --disable-pip-version-check -r requirements.txt
+        # Every package, including Playwright's own dependencies, must match a
+        # pinned SHA-256 checksum, and only prebuilt wheels are accepted, so a
+        # tampered or newly published package can't reach the secrets below.
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
 
       # State lives in the Actions cache instead of a commit, so nothing about
       # it appears in the repository history. Each run saves under a new key;
