@@ -64,6 +64,19 @@ jobs:
           path: .monitor-state.json
           key: monitor-state-${{ github.run_id }}-${{ github.run_attempt }}
 
+      # Optional dead-man's switch: pings HEARTBEAT_URL after every run (with
+      # /fail appended when the run failed), so an uptime service can alert
+      # you if the checks stop running. A failed ping never fails the check.
+      - name: Report heartbeat
+        if: always()
+        env:
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          [ -n "$HEARTBEAT_URL" ] || exit 0
+          [ "$OUTCOME" = success ] || HEARTBEAT_URL="$HEARTBEAT_URL/fail"
+          curl -fs -m 10 --retry 3 -o /dev/null "$HEARTBEAT_URL" || true
+
   # GitHub turns off scheduled workflows in a public repository after 60 days
   # without a commit. A dated commit once a month prevents that; it holds no
   # secrets and its timing is fixed, so it reveals nothing. Harmless in a

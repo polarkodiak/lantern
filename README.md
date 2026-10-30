@@ -32,6 +32,7 @@ reversed without `STATE_KEY`.
    | `NOTIFY_DETAILS` | `true` to include the matched keywords and an excerpt in the notification. Off by default, so the notification services never see what you watch |
    | `NTFY_SERVER` | Self-hosted ntfy server, default `https://ntfy.sh` |
    | `NTFY_TOKEN` | ntfy access token, for a protected topic |
+   | `HEARTBEAT_URL` | Ping URL of an uptime check (e.g. a dead-man's switch), pinged after every run so you're alerted if the checks stop |
 
 2. Open **Actions → Page watch → Run workflow** and check that the run
    succeeds. A failed run means a setting is missing, the page layout changed,
