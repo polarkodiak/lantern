@@ -33,6 +33,8 @@ STATE_FILE = ".monitor-state.json"
 PAGE_FILE = ".page-section.bin"
 PAGE_BLOB_SIZE = 64 * 1024
 SECTION_TIMEOUT = 45
+FETCH_ATTEMPTS = 2
+RETRY_PAUSE = 5
 HTTP_TIMEOUT = 30
 DEFAULT_ALERT_TITLE = "Watched page alert"
 EXCERPT_CONTEXT = 120
@@ -116,8 +118,20 @@ def check_final_url(expected, actual):
         raise PageError("page was redirected away from the watched site")
 
 
-def fetch_page_text(url, section_start):
+def load_page(page, url, section_start):
     from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
+    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    wait_for_section(page, section_start)
+    try:
+        page.wait_for_load_state("networkidle", timeout=15_000)
+    except PlaywrightTimeout:
+        pass  # Some pages poll forever; use what has rendered.
+    check_final_url(url, page.url)
+    return page.inner_text("body")
+
+
+def fetch_page_text(url, section_start):
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -125,15 +139,18 @@ def fetch_page_text(url, section_start):
         # skips a ~150 MB browser download on every run.
         browser = p.chromium.launch(channel="chrome")
         try:
-            page = browser.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            wait_for_section(page, section_start)
-            try:
-                page.wait_for_load_state("networkidle", timeout=15_000)
-            except PlaywrightTimeout:
-                pass  # Some pages poll forever; use what has rendered.
-            check_final_url(url, page.url)
-            return page.inner_text("body")
+            for attempt in range(1, FETCH_ATTEMPTS + 1):
+                page = browser.new_page()
+                try:
+                    return load_page(page, url, section_start)
+                except Exception:
+                    # A slow or half-loaded page is usually a passing hiccup
+                    # on the site, so try once more before failing the check.
+                    if attempt == FETCH_ATTEMPTS:
+                        raise
+                    time.sleep(RETRY_PAUSE)
+                finally:
+                    page.close()
         finally:
             browser.close()
 

@@ -55,15 +55,16 @@ class Monitor:
     def path(self, name):
         return os.path.join(self.tmp, name)
 
-    def fetch(self, page, final_url=None):
+    def fetch(self, page, final_url=None, goto_fails=0):
         with open(self.path("page.txt"), "w") as f:
             f.write(page)
-        env = dict(self.page_env, FAKE_PAGE=self.path("page.txt"))
+        env = dict(self.page_env, FAKE_PAGE=self.path("page.txt"), FAKE_GOTO_FAILS=str(goto_fails))
         if final_url:
             env["FAKE_FINAL_URL"] = final_url
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch.object(monitor, "PAGE_FILE", self.path("page.bin")), \
              mock.patch.object(monitor, "SECTION_TIMEOUT", 0), \
+             mock.patch.object(monitor, "RETRY_PAUSE", 0), \
              redirect_stdout(io.StringIO()):
             monitor.run_fetch()
 
@@ -198,6 +199,16 @@ class PageTests(unittest.TestCase):
         with self.assertRaises(monitor.PageError):
             m.fetch("Loading...")
         self.assertEqual(before, m.state())
+
+    def test_one_failed_load_is_retried(self):
+        m = Monitor()
+        m.fetch(PAGE_MATCH, goto_fails=1)
+        sent, _ = m.check()
+        self.assertEqual(len(sent), 1)
+
+    def test_two_failed_loads_fail_the_check(self):
+        with self.assertRaises(RuntimeError):
+            Monitor().fetch(PAGE_MATCH, goto_fails=2)
 
     def test_redirect_away_from_site_fails(self):
         m = Monitor()

@@ -1,7 +1,11 @@
 """Minimal stand-in for playwright.sync_api, so the tests run without a
-browser. The page text comes from the file named by FAKE_PAGE."""
+browser. The page text comes from the file named by FAKE_PAGE.
+FAKE_GOTO_FAIL makes every page load fail; FAKE_GOTO_FAILS=N fails only the
+first N loads."""
 
 import os
+
+_loads = {"count": 0}
 
 
 class TimeoutError(Exception):
@@ -12,7 +16,8 @@ class _Page:
     url = ""
 
     def goto(self, url, **kwargs):
-        if os.environ.get("FAKE_GOTO_FAIL"):
+        _loads["count"] += 1
+        if os.environ.get("FAKE_GOTO_FAIL") or _loads["count"] <= int(os.environ.get("FAKE_GOTO_FAILS", "0")):
             raise RuntimeError(f"net::ERR_FAILED at {url}")
         self.url = os.environ.get("FAKE_FINAL_URL", url)
 
@@ -25,6 +30,9 @@ class _Page:
     def inner_text(self, selector):
         with open(os.environ["FAKE_PAGE"]) as f:
             return f.read()
+
+    def close(self):
+        pass
 
 
 class _Browser:
@@ -52,4 +60,5 @@ class _Playwright:
 
 
 def sync_playwright():
+    _loads["count"] = 0
     return _Playwright()
