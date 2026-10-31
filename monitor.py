@@ -35,6 +35,7 @@ PAGE_BLOB_SIZE = 64 * 1024
 SECTION_TIMEOUT = 45
 FETCH_ATTEMPTS = 2
 RETRY_PAUSE = 5
+CHECK_DURATION = 20
 HTTP_TIMEOUT = 30
 DEFAULT_ALERT_TITLE = "Watched page alert"
 EXCERPT_CONTEXT = 120
@@ -353,6 +354,7 @@ def send_alerts(cfg, message):
 
 
 def run_check():
+    started = time.monotonic()
     cfg = load_check_config()
     with open(PAGE_FILE, "rb") as f:
         section = unpack_section(f.read())
@@ -367,8 +369,10 @@ def run_check():
         send_alerts(cfg, build_message(cfg, section, matches))
 
     save_state(STATE_FILE, key, section, matches_text)
-    # Same output whether or not anything matched, so the public run log
-    # can't be used to tell when anything matched.
+    # Same output and the same duration whether or not anything matched, so
+    # neither the public run log nor the public step timings show when an
+    # alert was sent.
+    time.sleep(max(0.0, CHECK_DURATION - (time.monotonic() - started)))
     print("Check complete.")
 
 

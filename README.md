@@ -20,8 +20,10 @@ Each check runs as two jobs on separate machines:
   heartbeat. It uses only the Python standard library and never runs a
   browser.
 
-Both jobs run on every check, whether or not anything matched. A page that
-doesn't load properly is retried once before the check fails. Notification
+Both jobs run on every check, whether or not anything matched, and the check
+step always takes the same time, so neither the public log nor the public step
+timings show when an alert was sent. A page that doesn't load properly is
+retried once before the check fails. Notification
 requests never follow redirects, and every address must be `https://`.
 
 ## Setup

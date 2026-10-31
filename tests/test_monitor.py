@@ -68,7 +68,7 @@ class Monitor:
              redirect_stdout(io.StringIO()):
             monitor.run_fetch()
 
-    def check(self, fail=None):
+    def check(self, fail=None, duration=0):
         sent = []
 
         def fake_post(url, data, headers):
@@ -82,6 +82,7 @@ class Monitor:
              mock.patch.object(monitor, "post", fake_post), \
              mock.patch.object(monitor, "PAGE_FILE", self.path("page.bin")), \
              mock.patch.object(monitor, "STATE_FILE", self.path("state.json")), \
+             mock.patch.object(monitor, "CHECK_DURATION", duration), \
              redirect_stdout(out):
             monitor.run_check()
         return sent, out.getvalue()
@@ -123,6 +124,16 @@ class AlertTests(unittest.TestCase):
         self.assertEqual(body["title"], "Watched page alert")
         self.assertEqual(body["click"], URL)
         self.assertNotIn("maple", body["message"].lower())
+
+    def test_check_takes_the_same_time_with_or_without_an_alert(self):
+        for page, alerts in ((PAGE_NONE, 0), (PAGE_MATCH, 1)):
+            m = Monitor()
+            m.fetch(page)
+            with mock.patch.object(monitor.time, "sleep") as sleep:
+                sent, _ = m.check(duration=20)
+            self.assertEqual(len(sent), alerts)
+            padded = sleep.call_args.args[0]
+            self.assertTrue(19 < padded <= 20, padded)  # padded up to the fixed duration
 
     def test_alert_title_override(self):
         sent, _ = Monitor(check_env={"ALERT_TITLE": "Custom"})(PAGE_MATCH)
@@ -323,8 +334,14 @@ class CommandLineTests(unittest.TestCase):
             f.write(PAGE_NONE)
         r = self.run_cli(["fetch"], dict(PAGE_ENV, FAKE_PAGE=page), tmp)
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "Page loaded."))
-        r = self.run_cli(["check"], CHECK_ENV, tmp)  # no match, so nothing is sent
-        self.assertEqual((r.returncode, r.stdout.strip()), (0, "Check complete."))
+        out = io.StringIO()
+        env = dict(CHECK_ENV, PATH=os.environ["PATH"])
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(monitor, "PAGE_FILE", os.path.join(tmp, monitor.PAGE_FILE)), \
+             mock.patch.object(monitor, "STATE_FILE", os.path.join(tmp, monitor.STATE_FILE)), \
+             mock.patch.object(monitor, "CHECK_DURATION", 0), redirect_stdout(out):
+            monitor.main(["monitor.py", "check"])  # no match, so nothing is sent
+        self.assertEqual(out.getvalue().strip(), "Check complete.")
 
 
 if __name__ == "__main__":
