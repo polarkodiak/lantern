@@ -23,8 +23,10 @@ Each check runs as two jobs on separate machines:
 Both jobs run on every check, whether or not anything matched, and the check
 step always takes the same time, so neither the public log nor the public step
 timings show when an alert was sent. A page that doesn't load properly is
-retried once before the check fails. Notification
-requests never follow redirects, and every address must be `https://`.
+retried once before the check fails. A third job, **cleanup**, deletes the
+page hand-over from the cache as soon as the check job has used it; it gets no
+secrets and runs only the GitHub CLI. Notification requests never follow
+redirects, and every address must be `https://`.
 
 ## Setup
 

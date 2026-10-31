@@ -32,6 +32,7 @@ import zlib
 STATE_FILE = ".monitor-state.json"
 PAGE_FILE = ".page-section.bin"
 PAGE_BLOB_SIZE = 64 * 1024
+MAX_SECTION_BYTES = 1024 * 1024
 SECTION_TIMEOUT = 45
 FETCH_ATTEMPTS = 2
 RETRY_PAUSE = 5
@@ -172,8 +173,9 @@ def extract_section(text, start, end):
 
 
 def pack_section(section):
-    data = zlib.compress(section.encode())
-    if len(data) > PAGE_BLOB_SIZE - 4:
+    raw = section.encode()
+    data = zlib.compress(raw)
+    if len(raw) > MAX_SECTION_BYTES or len(data) > PAGE_BLOB_SIZE - 4:
         raise PageError("watched section is too large")
     # Random padding to a fixed size, so the cached file's size never
     # reveals anything about the page.
@@ -186,8 +188,14 @@ def unpack_section(blob):
         raise PageError("page data from the fetch job is invalid")
     size = int.from_bytes(blob[:4], "big")
     try:
-        return zlib.decompress(blob[4:4 + size]).decode()
-    except (zlib.error, UnicodeDecodeError):
+        # Unpack at most MAX_SECTION_BYTES, so a tampered hand-over can't make
+        # the check job expand it into something huge.
+        unpacker = zlib.decompressobj()
+        raw = unpacker.decompress(blob[4:4 + size], MAX_SECTION_BYTES)
+        if unpacker.unconsumed_tail or unpacker.unused_data or not unpacker.eof:
+            raise ValueError
+        return raw.decode()
+    except (zlib.error, ValueError):
         raise PageError("page data from the fetch job is invalid") from None
 
 

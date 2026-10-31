@@ -14,6 +14,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import zlib
 from contextlib import redirect_stdout
 from unittest import mock
 
@@ -200,6 +201,18 @@ class StateTests(unittest.TestCase):
             monitor.unpack_section(b"\xff" * monitor.PAGE_BLOB_SIZE)
         with self.assertRaises(monitor.PageError):
             monitor.pack_section(os.urandom(70_000).hex())
+
+    def test_unpacking_is_capped(self):
+        with self.assertRaises(monitor.PageError):
+            monitor.pack_section("a" * (monitor.MAX_SECTION_BYTES + 1))  # compresses small, still refused
+        bomb = zlib.compress(b"a" * 10_000_000)  # a forged hand-over that expands to 10 MB
+        blob = len(bomb).to_bytes(4, "big") + bomb
+        blob += b"\0" * (monitor.PAGE_BLOB_SIZE - len(blob))
+        with self.assertRaises(monitor.PageError):
+            monitor.unpack_section(blob)
+        valid = monitor.pack_section("short section")
+        with self.assertRaises(monitor.PageError):  # declared length doesn't match the data
+            monitor.unpack_section((999).to_bytes(4, "big") + valid[4:])
 
 
 class PageTests(unittest.TestCase):

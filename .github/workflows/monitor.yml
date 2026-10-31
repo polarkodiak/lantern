@@ -127,8 +127,36 @@ jobs:
             https://*) ;;
             *) echo "HEARTBEAT_URL must be an https:// address" >&2; exit 1 ;;
           esac
-          [ "$OUTCOME" = success ] || HEARTBEAT_URL="$HEARTBEAT_URL/fail"
+          if [ "$OUTCOME" != success ]; then
+            # Add /fail to the path, keeping any ?query after it.
+            base="${HEARTBEAT_URL%%\?*}"
+            HEARTBEAT_URL="${base%/}/fail${HEARTBEAT_URL#"$base"}"
+          fi
           curl -fs --proto =https -m 10 --retry 3 -o /dev/null "$HEARTBEAT_URL" || true
+
+  # Deletes the page hand-over from the Actions cache once the check job has
+  # used it, along with any older ones, so the page text doesn't stay in the
+  # cache. It gets no secrets and runs no outside code, only the GitHub CLI
+  # that comes with the runner. A deletion that fails is caught up by the
+  # next run, which clears every leftover hand-over.
+  cleanup:
+    needs: [fetch, check]
+    if: always() && github.event.schedule != '40 3 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete page hand-overs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          deleted=0
+          while read -r key; do
+            gh cache delete "$key" > /dev/null 2>&1 && deleted=$((deleted + 1))
+          done < <(gh cache list --key page- --limit 1000 --json key --jq '.[].key' 2> /dev/null || true)
+          echo "Deleted $deleted page hand-over(s)."
 
   # GitHub turns off scheduled workflows in a public repository after 60 days
   # without a commit. A dated commit once a month prevents that; it holds no
