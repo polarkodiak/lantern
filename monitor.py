@@ -1,10 +1,20 @@
 """Check a JavaScript-rendered page for watched keywords and send a push
 notification when one appears.
 
+Each check runs as two commands on two separate machines:
+
+  monitor.py fetch  loads the page in Chrome and saves the watched section.
+                    It is given only the page address and section headings,
+                    so a malicious page, a browser exploit or a tampered
+                    package can't reach the keywords or credentials.
+  monitor.py check  matches the keywords, keeps state and sends alerts. It
+                    uses only the Python standard library and never runs a
+                    browser.
+
 Everything that would identify what is being watched (the page, the
 keywords, the notification channels) comes from environment variables that
-the workflow fills from repository secrets, and the script never prints any
-of it, and the state it keeps between runs is salted HMACs that reveal nothing
+the workflow fills from repository secrets. The script never prints any of
+it, and the state it keeps between runs is salted HMACs that reveal nothing
 without STATE_KEY.
 """
 
@@ -14,10 +24,15 @@ import json
 import os
 import secrets
 import sys
+import time
 import urllib.parse
 import urllib.request
+import zlib
 
 STATE_FILE = ".monitor-state.json"
+PAGE_FILE = ".page-section.bin"
+PAGE_BLOB_SIZE = 64 * 1024
+SECTION_TIMEOUT = 45
 HTTP_TIMEOUT = 30
 DEFAULT_ALERT_TITLE = "Watched page alert"
 EXCERPT_CONTEXT = 120
@@ -43,6 +58,17 @@ def env(name, required=False):
     return value
 
 
+def https_url(name, value):
+    parts = urllib.parse.urlsplit(value)
+    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+        raise ConfigError(f"{name} must be an https:// address")
+    return value
+
+
+def same_site(host_a, host_b):
+    return host_a.lower().removeprefix("www.") == host_b.lower().removeprefix("www.")
+
+
 def normalize(text):
     # casefold() is a stricter lower(), and split()/join collapses newlines,
     # tabs and non-breaking spaces, so "Maple\nGrove" still matches
@@ -61,45 +87,33 @@ def mask(value):
         print(f"::add-mask::{escaped}", flush=True)
 
 
-def load_config():
-    raw_keywords = [kw.strip() for kw in env("KEYWORDS", required=True).split(",")]
-    keywords = []
-    for kw in map(normalize, raw_keywords):
-        if kw and kw not in keywords:
-            keywords.append(kw)
-    if not keywords:
-        raise ConfigError("KEYWORDS has no usable entries")
+# --- fetch: runs the browser, knows only the page settings -----------------
 
-    state_key = env("STATE_KEY", required=True)
-    if len(state_key) < 32:
-        raise ConfigError("STATE_KEY must be at least 32 characters")
-
+def load_fetch_config():
     cfg = {
-        "url": env("WATCH_URL", required=True),
-        "keywords": keywords,
-        "state_key": state_key.encode(),
+        "url": https_url("WATCH_URL", env("WATCH_URL", required=True)),
         "section_start": normalize(env("SECTION_START", required=True)),
         "section_end": normalize(env("SECTION_END")),
-        "ntfy_server": env("NTFY_SERVER") or "https://ntfy.sh",
-        "ntfy_topic": env("NTFY_TOPIC"),
-        "ntfy_token": env("NTFY_TOKEN"),
-        "pushover_token": env("PUSHOVER_TOKEN"),
-        "pushover_user": env("PUSHOVER_USER"),
-        "details": env("NOTIFY_DETAILS").lower() in ("1", "true", "yes"),
-        "title": env("ALERT_TITLE") or DEFAULT_ALERT_TITLE,
     }
-    for name, value in (("WATCH_URL", cfg["url"]), ("NTFY_SERVER", cfg["ntfy_server"])):
-        if not value.startswith("https://"):
-            raise ConfigError(f"{name} must start with https://")
-    if bool(cfg["pushover_token"]) != bool(cfg["pushover_user"]):
-        raise ConfigError("set both PUSHOVER_TOKEN and PUSHOVER_USER, or neither")
-    if not (cfg["ntfy_topic"] or cfg["pushover_token"]):
-        raise ConfigError("no notification channel: set NTFY_TOPIC and/or PUSHOVER_TOKEN + PUSHOVER_USER")
-
-    for value in [*raw_keywords, *keywords, state_key, cfg["url"], cfg["ntfy_topic"],
-                  cfg["ntfy_token"], cfg["pushover_token"], cfg["pushover_user"]]:
-        mask(value)
+    mask(cfg["url"])
     return cfg
+
+
+def wait_for_section(page, marker):
+    # Polled from Python so the heading is matched by exactly the same rules
+    # as the keywords. Don't treat a half-rendered page as "no matches": that
+    # would overwrite the state and re-send an old alert on the next run.
+    deadline = time.monotonic() + SECTION_TIMEOUT
+    while marker not in normalize(page.inner_text("body")):
+        if time.monotonic() >= deadline:
+            raise PageError("section start text never appeared")
+        page.wait_for_timeout(1000)
+
+
+def check_final_url(expected, actual):
+    final = urllib.parse.urlsplit(actual)
+    if final.scheme != "https" or not same_site(final.hostname or "", urllib.parse.urlsplit(expected).hostname):
+        raise PageError("page was redirected away from the watched site")
 
 
 def fetch_page_text(url, section_start):
@@ -113,21 +127,12 @@ def fetch_page_text(url, section_start):
         try:
             page = browser.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            try:
-                page.wait_for_function(
-                    """marker => document.body &&
-                        document.body.innerText.toLowerCase().replace(/\\s+/g, " ").includes(marker)""",
-                    arg=section_start,
-                    timeout=45_000,
-                )
-            except PlaywrightTimeout:
-                # Don't treat a half-rendered page as "no matches": that would
-                # overwrite the state and re-send an old alert on the next run.
-                raise PageError("section start text never appeared") from None
+            wait_for_section(page, section_start)
             try:
                 page.wait_for_load_state("networkidle", timeout=15_000)
             except PlaywrightTimeout:
                 pass  # Some pages poll forever; use what has rendered.
+            check_final_url(url, page.url)
             return page.inner_text("body")
         finally:
             browser.close()
@@ -146,6 +151,73 @@ def extract_section(text, start, end):
         if stop != -1:
             section = section[:stop]
     return section
+
+
+def pack_section(section):
+    data = zlib.compress(section.encode())
+    if len(data) > PAGE_BLOB_SIZE - 4:
+        raise PageError("watched section is too large")
+    # Random padding to a fixed size, so the cached file's size never
+    # reveals anything about the page.
+    padding = secrets.token_bytes(PAGE_BLOB_SIZE - 4 - len(data))
+    return len(data).to_bytes(4, "big") + data + padding
+
+
+def unpack_section(blob):
+    if len(blob) != PAGE_BLOB_SIZE:
+        raise PageError("page data from the fetch job is invalid")
+    size = int.from_bytes(blob[:4], "big")
+    try:
+        return zlib.decompress(blob[4:4 + size]).decode()
+    except (zlib.error, UnicodeDecodeError):
+        raise PageError("page data from the fetch job is invalid") from None
+
+
+def run_fetch():
+    cfg = load_fetch_config()
+    text = fetch_page_text(cfg["url"], cfg["section_start"])
+    section = extract_section(text, cfg["section_start"], cfg["section_end"])
+    with open(PAGE_FILE, "wb") as f:
+        f.write(pack_section(section))
+    print("Page loaded.")
+
+
+# --- check: matches, keeps state and alerts; standard library only ---------
+
+def load_check_config():
+    raw_keywords = [kw.strip() for kw in env("KEYWORDS", required=True).split(",")]
+    keywords = []
+    for kw in map(normalize, raw_keywords):
+        if kw and kw not in keywords:
+            keywords.append(kw)
+    if not keywords:
+        raise ConfigError("KEYWORDS has no usable entries")
+
+    state_key = env("STATE_KEY", required=True)
+    if len(state_key) < 32:
+        raise ConfigError("STATE_KEY must be at least 32 characters")
+
+    cfg = {
+        "url": https_url("WATCH_URL", env("WATCH_URL", required=True)),
+        "keywords": keywords,
+        "state_key": state_key.encode(),
+        "ntfy_server": https_url("NTFY_SERVER", env("NTFY_SERVER") or "https://ntfy.sh"),
+        "ntfy_topic": env("NTFY_TOPIC"),
+        "ntfy_token": env("NTFY_TOKEN"),
+        "pushover_token": env("PUSHOVER_TOKEN"),
+        "pushover_user": env("PUSHOVER_USER"),
+        "details": env("NOTIFY_DETAILS").lower() in ("1", "true", "yes"),
+        "title": env("ALERT_TITLE") or DEFAULT_ALERT_TITLE,
+    }
+    if bool(cfg["pushover_token"]) != bool(cfg["pushover_user"]):
+        raise ConfigError("set both PUSHOVER_TOKEN and PUSHOVER_USER, or neither")
+    if not (cfg["ntfy_topic"] or cfg["pushover_token"]):
+        raise ConfigError("no notification channel: set NTFY_TOPIC and/or PUSHOVER_TOKEN + PUSHOVER_USER")
+
+    for value in [*raw_keywords, *keywords, state_key, cfg["url"], cfg["ntfy_topic"],
+                  cfg["ntfy_token"], cfg["pushover_token"], cfg["pushover_user"]]:
+        mask(value)
+    return cfg
 
 
 def digest(key, salt, label, value):
@@ -197,9 +269,20 @@ def build_message(cfg, section, matches):
     return "\n\n".join(lines)[:PUSHOVER_MESSAGE_LIMIT]
 
 
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects, so a request carrying a token can never be passed on
+    to another address. A refused redirect surfaces as an HTTP error."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirects)
+
+
 def post(url, data, headers):
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+    with OPENER.open(request, timeout=HTTP_TIMEOUT) as response:
         return response.read()
 
 
@@ -252,10 +335,10 @@ def send_alerts(cfg, message):
         raise AlertError("delivery failed: " + ", ".join(failed))
 
 
-def main():
-    cfg = load_config()
-    text = fetch_page_text(cfg["url"], cfg["section_start"])
-    section = extract_section(text, cfg["section_start"], cfg["section_end"])
+def run_check():
+    cfg = load_check_config()
+    with open(PAGE_FILE, "rb") as f:
+        section = unpack_section(f.read())
     matches = [kw for kw in cfg["keywords"] if kw in section]
     matches_text = "\n".join(sorted(matches))
 
@@ -272,9 +355,19 @@ def main():
     print("Check complete.")
 
 
+COMMANDS = {"fetch": run_fetch, "check": run_check}
+
+
+def main(argv):
+    command = argv[1] if len(argv) == 2 else ""
+    if command not in COMMANDS:
+        raise ConfigError("usage: monitor.py fetch|check")
+    COMMANDS[command]()
+
+
 if __name__ == "__main__":
     try:
-        main()
+        main(sys.argv)
     except (ConfigError, PageError, AlertError) as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         sys.exit(1)

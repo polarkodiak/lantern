@@ -14,13 +14,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check:
+  # Loads the page in Chrome. This job gets only the page address and the
+  # section headings, never the keywords, state key or notification
+  # credentials, so a malicious page, a browser exploit or a tampered package
+  # can't reach them. It hands the watched section to the check job, which
+  # runs on a separate machine, through the Actions cache.
+  fetch:
     if: github.event.schedule != '40 3 1 * *'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       # Actions are pinned to full commit SHAs so a moved tag can't swap in
-      # code that reads the secrets below.
+      # different code.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -31,15 +36,54 @@ jobs:
 
       - name: Install dependencies
         # Every package, including Playwright's own dependencies, must match a
-        # pinned SHA-256 checksum, and only prebuilt wheels are accepted, so a
-        # tampered or newly published package can't reach the secrets below.
+        # pinned SHA-256 checksum, and only prebuilt wheels are accepted.
         run: |
           python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+
+      - name: Load page
+        env:
+          WATCH_URL: ${{ secrets.WATCH_URL }}
+          SECTION_START: ${{ secrets.SECTION_START }}
+          SECTION_END: ${{ secrets.SECTION_END }}
+        run: python monitor.py fetch
+
+      - name: Hand over page
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .page-section.bin
+          key: page-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # Matches the keywords, keeps state and sends alerts and the heartbeat.
+  # Uses only the Python standard library and never runs a browser. It runs
+  # even when the fetch job fails, so the heartbeat can report the failure.
+  check:
+    needs: fetch
+    if: always() && github.event.schedule != '40 3 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Receive page
+        if: success() && needs.fetch.result == 'success'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .page-section.bin
+          key: page-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: page-${{ github.run_id }}-
+          fail-on-cache-miss: true
 
       # State lives in the Actions cache instead of a commit, so nothing about
       # it appears in the repository history. Each run saves under a new key;
       # the restore picks the most recent one.
       - name: Restore state
+        if: success() && needs.fetch.result == 'success'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .monitor-state.json
@@ -47,12 +91,11 @@ jobs:
           restore-keys: monitor-state-
 
       - name: Check page
+        if: success() && needs.fetch.result == 'success'
         env:
           WATCH_URL: ${{ secrets.WATCH_URL }}
           KEYWORDS: ${{ secrets.KEYWORDS }}
           STATE_KEY: ${{ secrets.STATE_KEY }}
-          SECTION_START: ${{ secrets.SECTION_START }}
-          SECTION_END: ${{ secrets.SECTION_END }}
           ALERT_TITLE: ${{ secrets.ALERT_TITLE }}
           NOTIFY_DETAILS: ${{ secrets.NOTIFY_DETAILS }}
           NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
@@ -60,26 +103,32 @@ jobs:
           NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
           PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
           PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
-        run: python monitor.py
+        run: python monitor.py check
 
       - name: Save state
+        if: success() && needs.fetch.result == 'success'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .monitor-state.json
           key: monitor-state-${{ github.run_id }}-${{ github.run_attempt }}
 
       # Optional dead-man's switch: pings HEARTBEAT_URL after every run (with
-      # /fail appended when the run failed), so an uptime service can alert
-      # you if the checks stop running. A failed ping never fails the check.
+      # /fail appended when either job failed), so an uptime service can alert
+      # you if the checks stop running. A network error on the ping never
+      # fails the check, but a non-https HEARTBEAT_URL does.
       - name: Report heartbeat
         if: always()
         env:
           HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
-          OUTCOME: ${{ job.status }}
+          OUTCOME: ${{ needs.fetch.result == 'success' && job.status || 'failure' }}
         run: |
           [ -n "$HEARTBEAT_URL" ] || exit 0
+          case "$HEARTBEAT_URL" in
+            https://*) ;;
+            *) echo "HEARTBEAT_URL must be an https:// address" >&2; exit 1 ;;
+          esac
           [ "$OUTCOME" = success ] || HEARTBEAT_URL="$HEARTBEAT_URL/fail"
-          curl -fs -m 10 --retry 3 -o /dev/null "$HEARTBEAT_URL" || true
+          curl -fs --proto =https -m 10 --retry 3 -o /dev/null "$HEARTBEAT_URL" || true
 
   # GitHub turns off scheduled workflows in a public repository after 60 days
   # without a commit. A dated commit once a month prevents that; it holds no
