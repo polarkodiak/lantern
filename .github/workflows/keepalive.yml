@@ -1,0 +1,32 @@
+name: Keepalive
+
+# GitHub turns off scheduled workflows in a public repository after 60 days
+# without a commit. A dated commit once a month prevents that; it holds no
+# secrets and its timing is fixed, so it reveals nothing. It's a separate
+# workflow so that queued checks can never cancel it. Harmless in a private
+# repository, where the 60-day rule doesn't apply.
+on:
+  schedule:
+    - cron: "40 3 1 * *"
+
+permissions:
+  contents: read
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Commit keepalive
+        run: |
+          date -u +%Y-%m > .keepalive
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .keepalive
+          git diff --cached --quiet && exit 0
+          git commit -m "Keep scheduled workflow active"
+          git push
