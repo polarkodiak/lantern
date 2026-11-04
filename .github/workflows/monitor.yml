@@ -58,8 +58,9 @@ jobs:
       - name: Hand over page
         id: handover
         run: |
-          # With debug logging on, GitHub prints every job output as it's
-          # set, so hand nothing over and fail instead.
+          # With step debug logging on, GitHub prints every job output as
+          # it's set, so hand nothing over and fail instead. (Runner
+          # diagnostic logging on its own doesn't, and isn't blocked.)
           if [ "${RUNNER_DEBUG:-}" = 1 ]; then
             echo "::error::Debug logging is on, so nothing is handed over."
             exit 1
@@ -87,8 +88,9 @@ jobs:
       - name: Hand over state
         id: state
         run: |
-          # With debug logging on, GitHub prints every job output as it's
-          # set, so hand nothing over and fail instead.
+          # With step debug logging on, GitHub prints every job output as
+          # it's set, so hand nothing over and fail instead. (Runner
+          # diagnostic logging on its own doesn't, and isn't blocked.)
           if [ "${RUNNER_DEBUG:-}" = 1 ]; then
             echo "::error::Debug logging is on, so nothing is handed over."
             exit 1

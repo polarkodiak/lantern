@@ -43,9 +43,11 @@ Each check runs as three jobs on separate machines:
   hand-over and the previous state can be passed to it as secrets, together
   with exactly the secrets it needs (never all of them). GitHub then shows
   them only as `***` in its log, as it does the real secrets; passed any
-  other way, it would print them. With debug logging on, GitHub also prints
+  other way, it would print them. With step debug logging on (a re-run with
+  debug logging, or an `ACTIONS_STEP_DEBUG` setting), GitHub also prints
   every job output as it's set, so the fetch and state jobs then refuse to
-  hand anything over and the run fails.
+  hand anything over and the run fails. Runner diagnostic logging on its own
+  doesn't print outputs (tested), so it isn't blocked.
 
 The check step prints the same line every time and is padded to 45 seconds,
 and the heartbeat step makes one request of the same kind in every case and
