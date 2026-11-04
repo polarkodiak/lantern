@@ -783,18 +783,30 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("::add-mask::https://x.invalid/a%2520b", lines)
 
 
-def workflow_jobs():
-    """Each job of monitor.yml as text, keyed by job name."""
-    with open(os.path.join(REPO, ".github", "workflows", "monitor.yml")) as f:
-        text = f.read()
-    body = text.split("\njobs:\n", 1)[1]
+def workflow_text(name):
+    with open(os.path.join(REPO, ".github", "workflows", name)) as f:
+        return f.read()
+
+
+def workflow_jobs(name="monitor.yml"):
+    """Each job of a workflow as text, keyed by job name."""
+    body = workflow_text(name).split("\njobs:\n", 1)[1]
     parts = re.split(r"^  ([a-z]+):\n", body, flags=re.M)
     return dict(zip(parts[1::2], parts[2::2]))
 
 
+def step_text(job, name):
+    return job.split(f"- name: {name}\n", 1)[1].split("\n      - ", 1)[0]
+
+
 def step_env(job, name):
-    step = job.split(f"- name: {name}\n", 1)[1].split("\n      - ", 1)[0]
-    return set(re.findall(r"^          ([A-Z_]+):", step, re.M))
+    return set(re.findall(r"^          ([A-Z_]+):", step_text(job, name), re.M))
+
+
+def step_script(job, name):
+    """The shell script of a step's `run: |` block."""
+    lines = step_text(job, name).split("run: |\n", 1)[1].splitlines()
+    return "\n".join(line[10:] for line in lines if line.startswith("          ") or not line.strip()) + "\n"
 
 
 class WorkflowTests(unittest.TestCase):
@@ -807,11 +819,22 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("actions/checkout", jobs["state"])  # and no code from the repo
 
     def test_check_job_never_unpacks_a_cache(self):
-        check = workflow_jobs()["check"]
+        self.assertIn("uses: ./.github/workflows/check.yml", workflow_jobs()["check"])
+        check = workflow_text("check.yml")
         self.assertNotIn("cache/restore", check)
         self.assertNotIn("download-artifact", check)
-        self.assertIn("needs.fetch.outputs.handover", check)
-        self.assertIn("needs.state.outputs.state", check)
+
+    def test_hand_over_and_state_arrive_as_secrets(self):
+        # Passed as secrets, GitHub shows them only as *** in the check job's
+        # log; passed any other way, it would print them.
+        caller = workflow_jobs()["check"]
+        self.assertIn("HANDOVER: ${{ needs.fetch.outputs.handover }}", caller.split("    secrets:\n", 1)[1])
+        self.assertIn("PREVIOUS_STATE: ${{ needs.state.outputs.state }}", caller.split("    secrets:\n", 1)[1])
+        self.assertNotIn("inherit", caller)  # only the secrets listed, never all of them
+        check = workflow_jobs("check.yml")["check"]
+        self.assertIn("HANDOVER: ${{ secrets.HANDOVER }}", step_text(check, "Check page"))
+        self.assertIn("PREVIOUS_STATE: ${{ secrets.PREVIOUS_STATE }}", step_text(check, "Check page"))
+        self.assertNotIn("outputs.", workflow_text("check.yml"))
 
     def test_every_setting_the_code_reads_is_passed(self):
         with open(os.path.join(REPO, "monitor.py")) as f:
@@ -823,8 +846,34 @@ class WorkflowTests(unittest.TestCase):
 
         jobs = workflow_jobs()
         self.assertEqual(step_env(jobs["fetch"], "Load page"), names("load_fetch_config"))
-        self.assertEqual(step_env(jobs["check"], "Check page"),
-                         names("load_check_config") | {"HANDOVER", "PREVIOUS_STATE"})
+        check_text = workflow_text("check.yml")
+        check = workflow_jobs("check.yml")["check"]
+        self.assertEqual(step_env(check, "Check page"), names("load_check_config") | {"HANDOVER", "PREVIOUS_STATE"})
+        declared = set(re.findall(r"^      ([A-Z_]+):\n        required: false$", check_text, re.M))
+        passed = set(re.findall(r"^      ([A-Z_]+): \$\{\{", jobs["check"], re.M))
+        used = set(re.findall(r"secrets\.([A-Z_]+)", check_text))
+        self.assertEqual(declared, passed)  # every secret check.yml declares is passed, and no others
+        self.assertLessEqual(used, declared)
+        self.assertLessEqual(names("load_check_config"), declared)
+
+    def test_nothing_is_handed_over_with_debug_logging(self):
+        # With debug logging on, GitHub prints job outputs as they're set.
+        jobs = workflow_jobs()
+        for job, step, input_file in (("fetch", "Hand over page", ".page-section.bin"),
+                                      ("state", "Hand over state", ".monitor-state.json")):
+            script = step_script(jobs[job], step)
+            for debug, expect_code, expect_output in (("1", 1, False), ("", 0, True)):
+                tmp = tempfile.mkdtemp()
+                with open(os.path.join(tmp, input_file), "w") as f:
+                    f.write("{}")
+                out = os.path.join(tmp, "out")
+                open(out, "w").close()
+                r = subprocess.run(["bash", "-e", "-c", script], cwd=tmp, capture_output=True, text=True,
+                                   env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": out, "RUNNER_DEBUG": debug})
+                with open(out) as f:
+                    written = f.read()
+                self.assertEqual((r.returncode, bool(written)), (expect_code, expect_output), (job, debug))
+                shutil.rmtree(tmp)
 
 
 class OpenerTests(unittest.TestCase):

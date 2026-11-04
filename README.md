@@ -39,6 +39,13 @@ Each check runs as three jobs on separate machines:
   uses only the Python standard library and the runner's `openssl`, never
   runs a browser and never unpacks a cache. It treats both the hand-over and
   the previous state as untrusted input.
+  The check job is a separate, reusable workflow (`check.yml`), so that the
+  hand-over and the previous state can be passed to it as secrets, together
+  with exactly the secrets it needs (never all of them). GitHub then shows
+  them only as `***` in its log, as it does the real secrets; passed any
+  other way, it would print them. With debug logging on, GitHub also prints
+  every job output as it's set, so the fetch and state jobs then refuse to
+  hand anything over and the run fails.
 
 The check step prints the same line every time and is padded to 45 seconds,
 and the heartbeat step makes one request of the same kind in every case and

@@ -1,0 +1,179 @@
+name: Check page
+
+# The check job of the Page watch workflow, which is the only thing that
+# can start it. It's a separate, reusable workflow so that the encrypted page
+# hand-over and the previous state can be passed to it as secrets: GitHub
+# then shows them only as *** in its log, like the real secrets, instead of
+# printing them. Page watch passes exactly the secrets listed here; the
+# monitor itself checks that the required ones are set.
+on:
+  workflow_call:
+    inputs:
+      fetch_result:
+        required: true
+        type: string
+      state_result:
+        required: true
+        type: string
+    secrets:
+      WATCH_URL:
+        required: false
+      KEYWORDS:
+        required: false
+      STATE_KEY:
+        required: false
+      HANDOVER_KEY:
+        required: false
+      ALERT_TITLE:
+        required: false
+      NOTIFY_DETAILS:
+        required: false
+      NTFY_SERVER:
+        required: false
+      NTFY_TOPIC:
+        required: false
+      NTFY_TOKEN:
+        required: false
+      NTFY_TAGS:
+        required: false
+      PUSHOVER_TOKEN:
+        required: false
+      PUSHOVER_USER:
+        required: false
+      HEARTBEAT_URL:
+        required: false
+      HANDOVER:
+        required: false
+      PREVIOUS_STATE:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Decrypts the page with HANDOVER_KEY, matches the keywords, keeps state and
+  # sends alerts and the heartbeat. Uses only the Python standard library and
+  # the runner's openssl, never runs a browser and never unpacks a cache. It
+  # runs even when another job fails, so the heartbeat can report it.
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # to confirm the new state was saved
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Check page
+        if: success() && inputs.fetch_result == 'success' && inputs.state_result == 'success'
+        env:
+          WATCH_URL: ${{ secrets.WATCH_URL }}
+          KEYWORDS: ${{ secrets.KEYWORDS }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+          ALERT_TITLE: ${{ secrets.ALERT_TITLE }}
+          NOTIFY_DETAILS: ${{ secrets.NOTIFY_DETAILS }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          NTFY_TAGS: ${{ secrets.NTFY_TAGS }}
+          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+          PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
+          HANDOVER_KEY: ${{ secrets.HANDOVER_KEY }}
+          # Untrusted input from the other jobs: passed in as secrets, so the
+          # log shows them only as ***, and as variables, so they can never
+          # become part of a command.
+          HANDOVER: ${{ secrets.HANDOVER }}
+          PREVIOUS_STATE: ${{ secrets.PREVIOUS_STATE }}
+        run: python monitor.py check
+
+      - name: Save state
+        if: success() && inputs.fetch_result == 'success' && inputs.state_result == 'success'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .monitor-state.json
+          key: monitor-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # The save step only warns if the upload fails, so check that the new
+      # state really is in the cache; if not, the heartbeat reports it.
+      - name: Confirm state saved
+        if: success() && inputs.fetch_result == 'success' && inputs.state_result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          KEY: monitor-state-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          for attempt in 1 2 3; do
+            found=$(gh cache list --key "$KEY" --json key --jq "[.[] | select(.key == \"$KEY\")] | length" 2> /dev/null || echo 0)
+            [ "$found" = 1 ] && exit 0
+            sleep 5
+          done
+          # Shown publicly: a lost save says nothing about the page or alerts.
+          echo "::warning::The new state couldn't be confirmed in the cache; the next run saves it again."
+          touch .state-not-saved
+
+      # Optional dead-man's switch. Any failure, including an alert that
+      # couldn't be delivered or a state that wasn't saved, pings
+      # HEARTBEAT_URL with /fail, privately instead of failing the public
+      # run. Success is pinged only by runs the outside service (or you)
+      # started, so the uptime check also notices if that service stops,
+      # even while GitHub's own schedule keeps running; GitHub's runs send
+      # /log, which records the run without counting as success. Every case
+      # makes one request of the same kind, with one overall time limit, and
+      # the step is padded to 15 seconds, so its public duration doesn't
+      # show which it was. Unless the ping gets exactly HTTP 200, the run
+      # fails, so a private failure is never lost; a non-https HEARTBEAT_URL
+      # fails it too.
+      - name: Report heartbeat
+        if: always()
+        env:
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+          EVENT: ${{ github.event_name }}
+          OUTCOME: ${{ inputs.fetch_result == 'success' && inputs.state_result == 'success' && job.status || 'failure' }}
+        run: |
+          started=$(date +%s)
+          private_failure=false
+          if [ -e .delivery-failed ] || [ -e .state-not-saved ]; then private_failure=true; fi
+          if [ -z "$HEARTBEAT_URL" ]; then
+            # With no heartbeat to report it privately, such a failure fails
+            # the run instead, so it's never silent.
+            if [ "$private_failure" = true ]; then
+              echo "An alert couldn't be delivered or the state wasn't saved. Set HEARTBEAT_URL to have this reported privately." >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          case "$HEARTBEAT_URL" in
+            https://*) ;;
+            *) echo "HEARTBEAT_URL must be an https:// address" >&2; exit 1 ;;
+          esac
+          base="${HEARTBEAT_URL%%\?*}"
+          if [ "$OUTCOME" != success ] || [ "$private_failure" = true ]; then
+            ending=/fail
+          elif [ "$EVENT" != workflow_dispatch ]; then
+            ending=/log
+          else
+            ending=
+          fi
+          # Add the ending to the path, keeping any ?query after it.
+          [ -z "$ending" ] || HEARTBEAT_URL="${base%/}${ending}${HEARTBEAT_URL#"$base"}"
+          # Exactly HTTP 200 counts as delivered; a redirect is never followed
+          # (so the URL isn't passed on) and counts as a failure. One overall
+          # limit of 13 seconds covers every retry, so with the padding the
+          # step normally takes about 15 seconds whatever the outcome (the
+          # machine's own delays can still add a little).
+          code=$(timeout 13 curl -s --proto =https --connect-timeout 4 -m 5 --retry 2 --retry-delay 1 \
+            --retry-max-time 12 -o /dev/null -w '%{http_code}' "$HEARTBEAT_URL" || true)
+          status=0
+          [ "$code" = 200 ] || status=1
+          elapsed=$(( $(date +%s) - started ))
+          [ "$elapsed" -ge 15 ] || sleep $(( 15 - elapsed ))
+          if [ "$status" != 0 ]; then
+            echo "::error::Couldn't reach HEARTBEAT_URL."
+            exit 1
+          fi
