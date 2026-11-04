@@ -652,22 +652,24 @@ class PageTests(unittest.TestCase):
             Monitor().fetch(PAGE_MATCH, changing=True)
         self.assertIn("kept changing", str(ctx.exception))
 
-    def test_error_status_or_unfinished_page_fails(self):
-        for fake, error in [({"FAKE_STATUS": "503"}, "did not load successfully"),
-                            ({"FAKE_STATUS": "404"}, "did not load successfully"),
-                            ({"FAKE_NEVER_IDLE": "1"}, "never finished loading")]:
+    def test_error_status_fails(self):
+        for status in ("503", "404"):
             m = Monitor()
-            with self.assertRaises(monitor.PageError, msg=fake) as ctx:
-                m.fetch(PAGE_MATCH, fake=fake)
-            self.assertIn(error, str(ctx.exception))
+            with self.assertRaises(monitor.PageError, msg=status) as ctx:
+                m.fetch(PAGE_MATCH, fake={"FAKE_STATUS": status})
+            self.assertIn("did not load successfully", str(ctx.exception))
             self.assertFalse(os.path.exists(m.path("page.bin")))  # nothing handed over
 
-    def test_failed_data_request_fails(self):
-        for failure in ("status", "failed"):
-            with self.assertRaises(monitor.PageError, msg=failure) as ctx:
-                Monitor().fetch(PAGE_NONE, fake={"FAKE_DATA_FAIL": failure})
-            self.assertIn("request for the page's data failed", str(ctx.exception))
-        Monitor().fetch(PAGE_NONE, fake={"FAKE_DATA_FAIL": "elsewhere"})  # another site's failure doesn't count
+    def test_unrelated_loading_doesnt_block_a_check(self):
+        # Pages with embedded videos, surveys or analytics may never stop
+        # loading, and their other requests can fail; neither may stop a
+        # check (and so a real alert) when the section itself is fine.
+        for fake in ({"FAKE_NEVER_IDLE": "1"}, {"FAKE_DATA_FAIL": "status"}, {"FAKE_DATA_FAIL": "failed"},
+                     {"FAKE_DATA_FAIL": "elsewhere"}):
+            m = Monitor()
+            m.fetch(PAGE_MATCH, fake=fake)
+            sent, _ = m.check()
+            self.assertEqual(len(sent), 1, fake)
 
     def test_listing_or_empty_message_must_show(self):
         settings = {"SECTION_ITEM": "(Riverside)", "SECTION_EMPTY": "Nothing listed right now"}

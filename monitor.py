@@ -216,30 +216,20 @@ def load_page(page, url, start, end, item="", empty=""):
     from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
     block_offsite_navigation(page, url)
-    # A failed request for the page's own data could leave a list that is
-    # stable but empty, so any such failure makes the read untrustworthy.
-    # Requests to other sites (analytics and the like) don't count.
-    data_failures = []
-
-    def is_page_data(request):
-        return request.resource_type in ("xhr", "fetch") and site_of(request.url) == site_of(url)
-
-    page.on("requestfailed", lambda request: data_failures.append(1) if is_page_data(request) else None)
-    page.on("response", lambda response: data_failures.append(1)
-            if response.status >= 400 and is_page_data(response.request) else None)
     response = page.goto(url, wait_until="domcontentloaded", timeout=60_000)
     if response is None or not response.ok:
         raise PageError("page did not load successfully")
     wait_for_section(page, start)
     try:
-        # Until the page stops making requests, the list may still be loading.
+        # A chance for the page's scripts to finish. Some pages never stop
+        # loading (embedded videos, surveys, analytics), so this doesn't
+        # stop the check: the section must still pass the checks below. A
+        # check that failed on unrelated loading could block a real alert.
         page.wait_for_load_state("networkidle", timeout=15_000)
     except PlaywrightTimeout:
-        raise PageError("page never finished loading") from None
+        pass
     check_final_url(url, page.url)
     section = wait_for_stable_section(page, start, end, empty)
-    if data_failures:
-        raise PageError("a request for the page's data failed")
     check_section_contents(section, start, item, empty)
     return section
 

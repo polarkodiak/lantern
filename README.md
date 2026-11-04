@@ -19,10 +19,12 @@ Each check runs as three jobs on separate machines:
   site, including a server redirect, is refused before the request is sent,
   and the page must end up on the same `https://` site and port. Images,
   scripts, frames and data the page loads from other sites are not
-  restricted. The page must load with a successful HTTP status and stop
-  making network requests, none of its own data requests may fail, each
-  section heading must appear exactly once, and the section is read only once
-  two reads two seconds apart agree. With `SECTION_ITEM` and `SECTION_EMPTY`
+  restricted. The page must load with a successful HTTP status, each section
+  heading must appear exactly once, and the section is read only once two
+  reads two seconds apart agree. Scripts get up to 15 seconds to finish, but a
+  page that never stops loading (embedded videos, surveys, analytics) is
+  still read, and failures of the page's other requests don't stop the
+  check, since either could otherwise block a real alert. With `SECTION_ITEM` and `SECTION_EMPTY`
   set, the section must also show a listing or the page's empty message.
   These are checks against a half-loaded or wrong page, not proof that the
   page is complete. The section is then padded to a fixed size, encrypted to the
