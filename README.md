@@ -1,8 +1,9 @@
 # Page watch
 
-Checks a JavaScript-rendered web page every 10 minutes and sends a push
-notification (ntfy and/or Pushover) when any watched keyword appears in a
-chosen section of it.
+Checks a JavaScript-rendered web page and sends a push notification (ntfy
+and/or Pushover) when any watched keyword appears in a chosen section of it.
+An outside service starts a check about every 10 minutes; GitHub's own
+schedule is only a slower backup, and neither is a real-time guarantee.
 
 The repository holds no details of what is being watched. The page address,
 section headings, keywords and notification credentials live only in
@@ -14,8 +15,8 @@ passed; see [Public repository](#public-repository).
 Each check runs as three jobs on separate machines:
 
 - **fetch** loads the page in Chrome, with Chrome's own sandbox on. It
-  receives only `WATCH_URL`, `SECTION_START` and `SECTION_END`, never the
-  keywords, keys or credentials. Navigation of the page itself to another
+  receives only `WATCH_URL`, `SECTION_START`, `SECTION_END` and the optional
+  `SECTION_ITEM` and `SECTION_EMPTY`, never the keywords, keys or credentials. Navigation of the page itself to another
   site, including a server redirect, is refused before the request is sent,
   and the page must end up on the same `https://` site and port. Images,
   scripts, frames and data the page loads from other sites are not
@@ -91,7 +92,8 @@ can't run code with the check job's secrets.
 
 ### State
 
-State is three salted HMAC-SHA256 values, which can't be reversed without
+State is two salted HMAC-SHA256 values (of the page section and of the
+matches), which can't be reversed without
 `STATE_KEY`, plus the time and the run number it was saved at, both inside
 the HMACs. A state that is missing, unreadable, older than two hours, from
 the future, or not saved by the previous run counts as a first run, which
@@ -135,8 +137,9 @@ new run instead.
 
 3. Open **Actions → Page watch → Run workflow** and check that the run
    succeeds. A failed run means a setting is missing, the page layout changed
-   or the hand-over key doesn't match. GitHub emails you about failed
-   scheduled runs.
+   or the hand-over key doesn't match. GitHub tells you about failed
+   scheduled runs if your notification settings allow it, and only if you
+   were the last to enable the workflow.
 
 ## Hand-over key
 
@@ -213,4 +216,4 @@ whether anything matched. If the repository is public:
   to be pinned to a full-length commit SHA, and keep workflow permissions
   read-only without permission to create pull requests.
 - **Rules:** a ruleset on all branches that restricts deletions and blocks
-  force pushes, with only the repository admin allowed to bypass.
+  force pushes, with an empty bypass list.
