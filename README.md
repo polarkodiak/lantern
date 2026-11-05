@@ -137,9 +137,11 @@ new run instead.
 
 3. Open **Actions → Page watch → Run workflow** and check that the run
    succeeds. A failed run means a setting is missing, the page layout changed
-   or the hand-over key doesn't match. GitHub tells you about failed
-   scheduled runs if your notification settings allow it, and only if you
-   were the last to enable the workflow.
+   or the hand-over key doesn't match. GitHub's notices about failed
+   scheduled runs go to the user it treats as the workflow's owner, which can
+   change when the workflow is re-enabled or its schedule edited. Re-enable
+   it yourself to take ownership, then check your notification settings and
+   that a notice actually arrives.
 
 ## Hand-over key
 
