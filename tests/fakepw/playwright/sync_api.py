@@ -1,5 +1,5 @@
 """Minimal stand-in for playwright.sync_api, so the tests run without a
-browser. The page text comes from the file named by FAKE_PAGE.
+browser. The page text is the synthetic text in FAKE_PAGE_TEXT.
 FAKE_GOTO_FAIL makes every page load fail; FAKE_GOTO_FAILS=N fails only the
 first N loads; FAKE_FINAL_URL sets where the page ends up; FAKE_STATUS sets
 the HTTP status (default 200); FAKE_NEVER_IDLE makes the page keep loading;
@@ -91,8 +91,7 @@ class _Page:
             raise TimeoutError("never idle")
 
     def inner_text(self, selector):
-        with open(os.environ["FAKE_PAGE"]) as f:
-            text = f.read()
+        text = os.environ["FAKE_PAGE_TEXT"]
         if os.environ.get("FAKE_CHANGING"):
             _loads["reads"] += 1
             text = text.replace("Notices\n", f"Notices\nupdate {_loads['reads']}\n", 1)

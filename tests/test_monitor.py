@@ -87,9 +87,7 @@ class Monitor:
         return os.path.join(self.tmp, name)
 
     def fetch(self, page, final_url=None, goto_fails=0, changing=False, cert=None, fake=None):
-        with open(self.path("page.txt"), "w") as f:
-            f.write(page)
-        env = dict(self.page_env, FAKE_PAGE=self.path("page.txt"), FAKE_GOTO_FAILS=str(goto_fails),
+        env = dict(self.page_env, FAKE_PAGE_TEXT=page, FAKE_GOTO_FAILS=str(goto_fails),
                    PATH=os.environ["PATH"], **(fake or {}))
         if final_url:
             env["FAKE_FINAL_URL"] = final_url
@@ -939,10 +937,7 @@ class CommandLineTests(unittest.TestCase):
     def test_errors_do_not_leak(self):
         tmp = tempfile.mkdtemp()
         shutil.copy(KEYS["cert"], os.path.join(tmp, "handover.crt"))
-        page = os.path.join(tmp, "p.txt")
-        with open(page, "w") as f:
-            f.write(PAGE_MATCH)
-        r = self.run_cli(["fetch"], dict(PAGE_ENV, FAKE_PAGE=page, FAKE_GOTO_FAIL="1"), tmp)
+        r = self.run_cli(["fetch"], dict(PAGE_ENV, FAKE_PAGE_TEXT=PAGE_MATCH, FAKE_GOTO_FAIL="1"), tmp)
         self.assertEqual((r.returncode, r.stdout, r.stderr.strip()), (1, "", "Check failed: RuntimeError"))
         r = self.run_cli(["check"], {}, tmp)
         self.assertEqual((r.returncode, r.stderr.strip()), (1, "ConfigError: KEYWORDS is not set"))
@@ -952,10 +947,7 @@ class CommandLineTests(unittest.TestCase):
     def test_fetch_then_check_end_to_end(self):
         tmp = tempfile.mkdtemp()
         shutil.copy(KEYS["cert"], os.path.join(tmp, "handover.crt"))
-        page = os.path.join(tmp, "p.txt")
-        with open(page, "w") as f:
-            f.write(PAGE_NONE)
-        r = self.run_cli(["fetch"], dict(PAGE_ENV, FAKE_PAGE=page), tmp)
+        r = self.run_cli(["fetch"], dict(PAGE_ENV, FAKE_PAGE_TEXT=PAGE_NONE), tmp)
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "Page loaded."))
         with open(os.path.join(tmp, monitor.PAGE_FILE), "rb") as f:
             handover = base64.b64encode(f.read()).decode()
