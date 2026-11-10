@@ -214,7 +214,11 @@ whether anything matched. If the repository is public:
 - On the same page, make fork pull request workflows need your approval for
   all outside contributors.
 - The `Keepalive` workflow commits a dated file once a month so GitHub
-  doesn't switch off the schedule after 60 days without a commit.
+  doesn't switch off the schedule after 60 days without a commit. Run it
+  once by hand (**Actions → Keepalive → Run workflow**) after setting the
+  repository rules, to confirm that it can push under them: a ruleset that
+  requires pull requests or signed commits would stop it, and GitHub only
+  emails about the failure.
 
 ## Recommended repository settings
 
