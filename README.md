@@ -191,10 +191,12 @@ Developer settings → Personal access tokens → Fine-grained tokens**) with:
 
 Don't use a classic token: its `repo` and `workflow` scopes reach every
 repository the account can, not just this one. Whoever holds the
-fine-grained token can start, cancel and re-run this repository's workflows,
-read its run logs (public anyway in a public repository) and delete its
-Actions caches, which loses the state and causes at most an extra alert; it
-can't read the secrets or change the code. If the service is ever
+fine-grained token can start, cancel, re-run and disable this repository's
+workflows, so it could stop the checks until you enable them again (the
+heartbeat notices); it can also read its run logs (public anyway in a public
+repository) and delete its Actions caches, which loses the state and causes
+at most an extra alert. It can't read the secrets or change the code. If the
+service is ever
 compromised, revoke the token on the same settings page. The token exists
 only in that service: never commit it, and never pass it to the workflow.
 
