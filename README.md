@@ -51,8 +51,8 @@ Each check runs as three jobs on separate machines:
   doesn't print outputs (tested), so it isn't blocked.
 
 The check step prints the same line every time and is padded to 45 seconds,
-and the heartbeat step makes one request of the same kind in every case and
-is padded to 15 seconds.
+and the heartbeat step makes at most one request, of the same kind in every
+case, and is padded to 15 seconds whether or not a heartbeat is set.
 Deliveries run in parallel against a 35-second deadline, so the step normally
 takes 45 seconds whether no alert was due, an alert was sent or a delivery
 failed. A failed delivery or a state that couldn't be saved doesn't fail the
