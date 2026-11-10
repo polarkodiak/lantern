@@ -57,9 +57,13 @@ Deliveries run in parallel against a 35-second deadline, so the step normally
 takes 45 seconds whether no alert was due, an alert was sent or a delivery
 failed. A failed delivery or a state that couldn't be saved doesn't fail the
 public run; it's reported privately through `HEARTBEAT_URL`. Alerts describe
-the page as it is now: after a failed delivery, the next run alerts again if
-a keyword is still listed, but not if the listing is gone by then. A page
-that doesn't load properly is retried once before the check fails.
+the page as it is now: after a failed delivery, the next run alerts that
+channel again if a keyword is still listed, but not if the listing is gone by
+then; a channel that confirmed the alert isn't repeated. A service can accept
+a message and still answer too late, which counts as a failure and repeats
+the alert on that channel once. A channel added to the settings later is
+alerted on its first run if a keyword is listed then. A page that doesn't
+load properly is retried once before the check fails.
 Notification requests never follow redirects, their replies are size-capped
 and must confirm the message, and every address must be `https://`.
 
@@ -92,10 +96,14 @@ can't run code with the check job's secrets.
 
 ### State
 
-State is two salted HMAC-SHA256 values (of the page section and of the
-matches), which can't be reversed without
-`STATE_KEY`, plus the time and the run number it was saved at, both inside
-the HMACs. A state that is missing, unreadable, older than two hours, from
+State is salted HMAC-SHA256 values of the page section and of the matches,
+plus one per notification channel that verifies only if that channel is up
+to date with them (it confirmed the alert, or there was nothing to deliver);
+a channel that isn't, or isn't configured, gets random bytes of the same
+size instead, so the state doesn't show a failed delivery either. None of it
+can be reversed or forged without `STATE_KEY`, and the time and the run
+number it was saved at are inside every HMAC. A state that is missing,
+unreadable, older than two hours, from
 the future, or not saved by the previous run counts as a first run, which
 errs toward alerting: after a failed run or a lost save, an older state could
 otherwise hide an alert that has come back. After saving, the check job

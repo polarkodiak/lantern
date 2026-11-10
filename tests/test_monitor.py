@@ -241,6 +241,38 @@ class AlertTests(unittest.TestCase):
         self.assertEqual(sent, [])
         self.assertFalse(os.path.exists(m.path("delivery-failed")))
 
+    BOTH = {"PUSHOVER_TOKEN": "t", "PUSHOVER_USER": "u"}
+    NTFY, PUSHOVER = "https://ntfy.sh/", "https://api.pushover.net/1/messages.json"
+
+    def test_only_the_channel_that_failed_is_alerted_again(self):
+        m = Monitor(check_env=self.BOTH)
+        sent, _ = m(PAGE_MATCH, fail="pushover")
+        self.assertEqual([url for url, _, _ in sent], [self.NTFY])  # ntfy confirmed
+        self.assertTrue(os.path.exists(m.path("delivery-failed")))
+        sent, _ = m(PAGE_MATCH)
+        self.assertEqual([url for url, _, _ in sent], [self.PUSHOVER])  # same page: pushover only
+        self.assertFalse(os.path.exists(m.path("delivery-failed")))
+        sent, _ = m(PAGE_MATCH)
+        self.assertEqual(sent, [])  # both up to date
+        sent, _ = m(PAGE_MATCH_MORE)
+        self.assertEqual(len(sent), 2)  # a change alerts both again
+        m(PAGE_NONE)
+        m(PAGE_MATCH, fail="pushover")
+        sent, _ = m(PAGE_NONE)
+        self.assertEqual(sent, [])  # the failed one is dropped once the listing is gone
+        sent, _ = m(PAGE_MATCH)
+        self.assertEqual(len(sent), 2)  # and both are alerted when it's back
+
+    def test_a_channel_added_later_is_alerted_about_a_current_listing(self):
+        m = Monitor()
+        sent, _ = m(PAGE_MATCH)
+        self.assertEqual(len(sent), 1)
+        m.check_env.update(self.BOTH)
+        sent, _ = m(PAGE_MATCH)
+        self.assertEqual([url for url, _, _ in sent], [self.PUSHOVER])  # the new one only
+        sent, _ = m(PAGE_MATCH)
+        self.assertEqual(sent, [])
+
     def test_service_reply_must_confirm_the_message(self):
         both = {"PUSHOVER_TOKEN": "t", "PUSHOVER_USER": "u"}
         for service, reply in [("ntfy", b"<html>Welcome</html>"), ("ntfy", b'{"event":"message","topic":"other","id":"x"}'),
@@ -281,6 +313,38 @@ class StateTests(unittest.TestCase):
         for s in (a, b, c):
             self.assertNotIn("maple", s.lower())
             self.assertNotIn("oakdale", s.lower())
+
+    def test_state_neither_shows_a_failed_delivery_nor_can_be_forged(self):
+        m = Monitor(check_env=AlertTests.BOTH)
+        m(PAGE_MATCH)
+        ok = m.state()
+        m.fetch(PAGE_MATCH_MORE)
+        m.check(fail="pushover")
+        failed = m.state()
+        self.assertEqual(len(ok), len(failed))
+        self.assertEqual(set(json.loads(ok)), set(json.loads(failed)))
+        for s in (ok, failed):
+            self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", json.loads(s)[c]) for c in monitor.CHANNELS))
+        # Copying ntfy's value into pushover's field doesn't make pushover up to date.
+        state = json.loads(failed)
+        state["pushover"] = state["ntfy"]
+        with open(m.path("state.json"), "w") as f:
+            json.dump(state, f)
+        sent, _ = m(PAGE_MATCH_MORE)
+        self.assertEqual([url for url, _, _ in sent], [AlertTests.PUSHOVER])
+        # A damaged value errs toward alerting that channel, and only that one.
+        state = json.loads(m.state())
+        state["ntfy"] = "0" * 64
+        with open(m.path("state.json"), "w") as f:
+            json.dump(state, f)
+        sent, _ = m(PAGE_MATCH_MORE)
+        self.assertEqual([url for url, _, _ in sent], [AlertTests.NTFY])
+        # A state in the earlier format, without the channel fields, counts as a first run.
+        state = {k: v for k, v in json.loads(m.state()).items() if k not in monitor.CHANNELS}
+        with open(m.path("state.json"), "w") as f:
+            json.dump(state, f)
+        sent, _ = m(PAGE_MATCH_MORE)
+        self.assertEqual(len(sent), 2)
 
     def test_corrupt_state_counts_as_first_run(self):
         for bad in ["not json", "[]", '{"salt":"zz","page":"00","matches":"00"}',
