@@ -61,9 +61,11 @@ the page as it is now: after a failed delivery, the next run alerts that
 channel again if a keyword is still listed, but not if the listing is gone by
 then; a channel that confirmed the alert isn't repeated. A service can accept
 a message and still answer too late, which counts as a failure and repeats
-the alert on that channel once. A channel added to the settings later is
-alerted on its first run if a keyword is listed then. A page that doesn't
-load properly is retried once before the check fails.
+the alert on that channel on the next run, and on every run it keeps
+happening. A channel added to the settings later, or pointed at a new
+topic, server or user key, is alerted on its first run if a keyword is
+listed then. A page that doesn't load properly is retried once before the
+check fails.
 Notification requests never follow redirects, their replies are size-capped
 and must confirm the message, and every address must be `https://`.
 
@@ -97,10 +99,11 @@ can't run code with the check job's secrets.
 ### State
 
 State is salted HMAC-SHA256 values of the page section and of the matches,
-plus one per notification channel that verifies only if that channel is up
-to date with them (it confirmed the alert, or there was nothing to deliver);
-a channel that isn't, or isn't configured, gets random bytes of the same
-size instead, so the state doesn't show a failed delivery either. None of it
+plus one per notification channel, of its destination, that verifies only if
+that destination is up to date with them (it confirmed the alert, or there
+was nothing to deliver); a channel that isn't, or isn't configured, gets
+random bytes of the same size instead, so the state doesn't show a failed
+delivery either. None of it
 can be reversed or forged without `STATE_KEY`, and the time and the run
 number it was saved at are inside every HMAC. A state that is missing,
 unreadable, older than two hours, from

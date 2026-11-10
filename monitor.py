@@ -522,7 +522,13 @@ def load_check_config():
         raise ConfigError("HANDOVER_KEY is too long to be a private key")
     if bool(cfg["pushover_token"]) != bool(cfg["pushover_user"]):
         raise ConfigError("set both PUSHOVER_TOKEN and PUSHOVER_USER, or neither")
-    cfg["channels"] = [name for name, on in (("ntfy", cfg["ntfy_topic"]), ("pushover", cfg["pushover_token"])) if on]
+    # Each configured channel and where it delivers to. A channel pointed
+    # somewhere new is alerted again about a listing that's already there.
+    cfg["channels"] = {}
+    if cfg["ntfy_topic"]:
+        cfg["channels"]["ntfy"] = cfg["ntfy_server"].rstrip("/") + "/" + cfg["ntfy_topic"]
+    if cfg["pushover_token"]:
+        cfg["channels"]["pushover"] = cfg["pushover_user"]
     if not cfg["channels"]:
         raise ConfigError("no notification channel: set NTFY_TOPIC and/or PUSHOVER_TOKEN + PUSHOVER_USER")
 
@@ -598,6 +604,8 @@ def unchanged(key, state, label, value):
 
 
 def save_state(path, key, page, matches_text, up_to_date, now, run_number):
+    """up_to_date maps each channel that has this page and these matches to
+    the destination that has them."""
     # A fresh random salt every run means two states never look alike, even
     # when nothing changed, and the file is always the same size.
     salt = secrets.token_bytes(16)
@@ -610,10 +618,11 @@ def save_state(path, key, page, matches_text, up_to_date, now, run_number):
         "matches": digest(key, salt, "matches", saved_at, run_number, matches_text),
     }
     for name in CHANNELS:
-        # A channel that has this page and these matches gets a value it can
-        # verify; any other (a failed delivery, or not configured) gets
-        # random bytes of the same size, so the state doesn't show which.
-        state[name] = (digest(key, salt, name, saved_at, run_number, "up to date") if name in up_to_date
+        # A channel whose destination has this page and these matches gets an
+        # HMAC of that destination; any other (a failed delivery, or not
+        # configured) gets random bytes of the same size, so the state
+        # doesn't show which.
+        state[name] = (digest(key, salt, name, saved_at, run_number, up_to_date[name]) if name in up_to_date
                        else secrets.token_hex(32))
     with open(path, "w") as f:
         json.dump(state, f)
@@ -745,20 +754,23 @@ def run_check():
     key = cfg["state_key"]
     now = wall_clock()
     state = load_state(STATE_FILE, now, run_number)
-    # A channel that confirmed an alert for this same page and these same
-    # matches (or had nothing to deliver) is up to date and isn't alerted
-    # again. Every other configured channel is due one: the page or the
-    # matches changed, its last delivery failed, or it was added since.
+    # A channel whose destination confirmed an alert for this same page and
+    # these same matches (or had nothing to deliver) is up to date and isn't
+    # alerted again. Every other configured channel is due one: the page or
+    # the matches changed, its last delivery failed, or it's new or points
+    # somewhere new.
     same = unchanged(key, state, "page", section) and unchanged(key, state, "matches", matches_text)
-    up_to_date = {name for name in cfg["channels"] if same and unchanged(key, state, name, "up to date")}
-    due = [name for name in cfg["channels"] if name not in up_to_date]
+    channels = cfg["channels"]
+    up_to_date = {name: to for name, to in channels.items() if same and unchanged(key, state, name, to)}
+    due = [name for name in channels if name not in up_to_date]
     if not matches:
-        up_to_date = set(cfg["channels"])
+        up_to_date = dict(channels)
     elif due:
-        up_to_date |= send_alerts(cfg, build_message(cfg, section, matches), due, started + SEND_BUDGET)
+        for name in send_alerts(cfg, build_message(cfg, section, matches), due, started + SEND_BUDGET):
+            up_to_date[name] = channels[name]
 
     save_state(STATE_FILE, key, section, matches_text, up_to_date, now, run_number)
-    if matches and set(due) - up_to_date:
+    if matches and set(due) - set(up_to_date):
         # A failed delivery must not show in the public run: the state
         # records which channels still haven't confirmed, so the next run
         # alerts them again if a keyword is still listed, and a marker tells

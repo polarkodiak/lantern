@@ -263,7 +263,7 @@ class AlertTests(unittest.TestCase):
         sent, _ = m(PAGE_MATCH)
         self.assertEqual(len(sent), 2)  # and both are alerted when it's back
 
-    def test_a_channel_added_later_is_alerted_about_a_current_listing(self):
+    def test_a_channel_added_or_pointed_elsewhere_is_alerted_about_a_current_listing(self):
         m = Monitor()
         sent, _ = m(PAGE_MATCH)
         self.assertEqual(len(sent), 1)
@@ -272,6 +272,16 @@ class AlertTests(unittest.TestCase):
         self.assertEqual([url for url, _, _ in sent], [self.PUSHOVER])  # the new one only
         sent, _ = m(PAGE_MATCH)
         self.assertEqual(sent, [])
+        # A new destination counts as a new channel; a new token doesn't.
+        for setting, value, alerted in [("NTFY_TOPIC", "another_topic", [self.NTFY]),
+                                        ("NTFY_SERVER", "https://ntfy.example.invalid/", ["https://ntfy.example.invalid/"]),
+                                        ("PUSHOVER_USER", "u2", [self.PUSHOVER]),
+                                        ("NTFY_TOKEN", "tk_new", []), ("PUSHOVER_TOKEN", "t2", [])]:
+            m.check_env[setting] = value
+            sent, _ = m(PAGE_MATCH)
+            self.assertEqual([url for url, _, _ in sent], alerted, setting)
+            sent, _ = m(PAGE_MATCH)
+            self.assertEqual(sent, [], setting)
 
     def test_service_reply_must_confirm_the_message(self):
         both = {"PUSHOVER_TOKEN": "t", "PUSHOVER_USER": "u"}
