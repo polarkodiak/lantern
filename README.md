@@ -151,6 +151,49 @@ new run instead.
    it yourself to take ownership, then check your notification settings and
    that a notice actually arrives.
 
+4. Test an alert. A successful run shows that the settings were accepted
+   and the page was read, not that notifications arrive: a failed delivery
+   is kept out of the public result and reported only through
+   `HEARTBEAT_URL`. Add a word that is in the watched section right now to
+   `KEYWORDS`, start a run, and check that every configured channel gets a
+   notification. Then put `KEYWORDS` back exactly as it was. If one of the
+   original keywords is listed at that moment, putting it back causes one
+   more alert, because the matched keywords change.
+
+5. Set up the [outside trigger](#outside-trigger).
+
+## Outside trigger
+
+GitHub's own schedule runs late and often only about once an hour, so
+something outside GitHub (a cron job, a scheduled task on another host, an
+uptime service with a webhook) should start the workflow every 10 minutes
+through GitHub's API:
+
+```
+POST https://api.github.com/repos/OWNER/REPO/actions/workflows/monitor.yml/dispatches
+Authorization: Bearer TOKEN
+{"ref": "main"}
+```
+
+Give that service a fine-grained personal access token (**Settings →
+Developer settings → Personal access tokens → Fine-grained tokens**) with:
+
+- **Repository access:** only this repository.
+- **Permissions:** Actions: Read and write, and nothing else. Starting a
+  workflow needs no other permission.
+- **Expiration:** the shortest that suits you, at most a year. GitHub emails
+  you before it expires; set your own reminder too, since an expired token
+  stops the checks and only the heartbeat notices.
+
+Don't use a classic token: its `repo` and `workflow` scopes reach every
+repository the account can, not just this one. Whoever holds the
+fine-grained token can start, cancel and re-run this repository's workflows,
+read its run logs (public anyway in a public repository) and delete its
+Actions caches, which loses the state and causes at most an extra alert; it
+can't read the secrets or change the code. If the service is ever
+compromised, revoke the token on the same settings page. The token exists
+only in that service: never commit it, and never pass it to the workflow.
+
 ## Hand-over key
 
 Generate the key pair on your own computer and send the private key straight
