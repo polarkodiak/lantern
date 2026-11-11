@@ -29,6 +29,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       handover: ${{ steps.handover.outputs.handover }}
+      reason: ${{ steps.reason.outputs.reason }}
     steps:
       # Actions are pinned to full commit SHAs so a moved tag can't swap in
       # different code.
@@ -41,12 +42,14 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
+        id: install
         # Every package, including Playwright's own dependencies, must match a
         # pinned SHA-256 checksum, and only prebuilt wheels are accepted.
         run: |
           python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
 
       - name: Load page
+        id: load
         env:
           WATCH_URL: ${{ secrets.WATCH_URL }}
           SECTION_START: ${{ secrets.SECTION_START }}
@@ -63,9 +66,28 @@ jobs:
           # diagnostic logging on its own doesn't, and isn't blocked.)
           if [ "${RUNNER_DEBUG:-}" = 1 ]; then
             echo "::error::Debug logging is on, so nothing is handed over."
+            echo debug_logging_on > .failure-reason
             exit 1
           fi
           echo "handover=$(base64 -w0 .page-section.bin)" >> "$GITHUB_OUTPUT"
+
+      # Why this job failed, as fixed categories that carry no data (see the
+      # README), for the heartbeat to report privately. Set even with debug
+      # logging on, since it's safe to print.
+      - name: Record failure
+        id: reason
+        if: failure()
+        env:
+          INSTALL: ${{ steps.install.outcome }}
+          LOAD: ${{ steps.load.outcome }}
+        run: |
+          if [ -f .failure-reason ]; then
+            reason=$(head -c 300 .failure-reason | tr '\n' ';' | tr -c 'A-Za-z0-9_:;.' '_')
+          elif [ "$INSTALL" = failure ]; then reason=install_failed
+          elif [ "$LOAD" = failure ]; then reason=load_failed
+          else reason=job_failed
+          fi
+          echo "reason=${reason%;}" >> "$GITHUB_OUTPUT"
 
   # Restores the previous run's state from the Actions cache. Restoring a
   # cache unpacks an archive, which could write files anywhere on the
@@ -77,8 +99,10 @@ jobs:
     timeout-minutes: 5
     outputs:
       state: ${{ steps.state.outputs.state }}
+      reason: ${{ steps.reason.outputs.reason }}
     steps:
       - name: Restore state
+        id: restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .monitor-state.json
@@ -93,11 +117,26 @@ jobs:
           # diagnostic logging on its own doesn't, and isn't blocked.)
           if [ "${RUNNER_DEBUG:-}" = 1 ]; then
             echo "::error::Debug logging is on, so nothing is handed over."
+            echo debug_logging_on > .failure-reason
             exit 1
           fi
           if [ -f .monitor-state.json ] && [ ! -L .monitor-state.json ] && [ "$(stat -c %s .monitor-state.json)" -le 4096 ]; then
             echo "state=$(base64 -w0 .monitor-state.json)" >> "$GITHUB_OUTPUT"
           fi
+
+      # Why this job failed, as above.
+      - name: Record failure
+        id: reason
+        if: failure()
+        env:
+          RESTORE: ${{ steps.restore.outcome }}
+        run: |
+          if [ -f .failure-reason ]; then
+            reason=$(head -c 300 .failure-reason | tr '\n' ';' | tr -c 'A-Za-z0-9_:;.' '_')
+          elif [ "$RESTORE" = failure ]; then reason=restore_failed
+          else reason=job_failed
+          fi
+          echo "reason=${reason%;}" >> "$GITHUB_OUTPUT"
 
   # Runs check.yml on a separate machine: decrypts the page, matches the
   # keywords, keeps state, and sends alerts and the heartbeat. The encrypted
@@ -133,3 +172,7 @@ jobs:
       # it's never printed in the check job's log.
       HANDOVER: ${{ needs.fetch.outputs.handover }}
       PREVIOUS_STATE: ${{ needs.state.outputs.state }}
+      # Why those jobs failed, if they did: fixed categories for the
+      # heartbeat's private report.
+      FETCH_REASON: ${{ needs.fetch.outputs.reason }}
+      STATE_REASON: ${{ needs.state.outputs.reason }}

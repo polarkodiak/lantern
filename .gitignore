@@ -1,6 +1,9 @@
 .monitor-state.json
 .page-section.bin
 .delivery-failed
+.state-not-saved
+.failure-reason
+.heartbeat-body
 *.key
 __pycache__/
 .venv/

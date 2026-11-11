@@ -47,8 +47,9 @@ Each check runs as three jobs on separate machines:
   other way, it would print them. With step debug logging on (a re-run with
   debug logging, or an `ACTIONS_STEP_DEBUG` setting), GitHub also prints
   every job output as it's set, so the fetch and state jobs then refuse to
-  hand anything over and the run fails. Runner diagnostic logging on its own
-  doesn't print outputs (tested), so it isn't blocked.
+  hand anything over and the run fails; only the failure reason, a fixed
+  category that carries no data, is still passed on. Runner diagnostic
+  logging on its own doesn't print outputs (tested), so it isn't blocked.
 
 The check step prints the same line every time and is padded to 45 seconds,
 and the heartbeat step makes one ping, with the same kind of request and
@@ -117,6 +118,26 @@ after it was last used. Re-running a run is refused, because a re-run could
 restore a state older than one its earlier attempt failed to save; start a
 new run instead.
 
+### Failure reasons
+
+When a run fails, or an alert or a state save fails privately, the `/fail`
+ping to `HEARTBEAT_URL` carries a short body, which healthchecks.io and
+similar services keep in the check's log: the run number, then one line per
+failure. Each line is a fixed category chosen by the code, never an error
+message, which could name the page, so the body is safe to keep anywhere.
+The public run shows none of it; its log still says only which step failed.
+
+| Line | Meaning |
+|---|---|
+| `run:951` | GitHub's run number, to find the run |
+| `fetch:attempt_1:net_error:ERR_CONNECTION_RESET;attempt_2:timeout` | The page couldn't be loaded; each attempt's reason. `net_error:ERR_…` is Chromium's name for a network error, `timeout` a page that didn't finish loading, `page_navigated` a page that reloaded or moved while being read, `browser_closed` a browser that went away, `browser_error` any other browser error, `error:Name` any other kind of error, and `page_error:…` or `config_error:…` the same fixed message the public log shows |
+| `fetch:install_failed`, `fetch:load_failed`, `fetch:job_failed`, `fetch:debug_logging_on`, `fetch:cancelled` | The fetch job failed outside the script, or was cancelled |
+| `state:restore_failed`, `state:debug_logging_on`, `state:cancelled` | The state job failed or was cancelled |
+| `check:…` | The check step failed, with the same kinds of reason |
+| `state_save_failed`, `state_not_saved` | The new state couldn't be saved, or wasn't found in the cache afterwards |
+| `delivery_failed:ntfy`, `delivery_failed:pushover` | That channel didn't confirm the alert |
+| `job_failed` | The check job failed outside its own steps, such as in the checkout |
+
 ## Setup
 
 1. Add these under **Settings → Secrets and variables → Actions → Secrets**:
@@ -142,7 +163,7 @@ new run instead.
    | `NTFY_TOKEN` | ntfy access token, for a protected topic |
    | `NTFY_TAGS` | Comma-separated ntfy tags, which show as icons on the notification, default `warning`. A secret because an icon can hint at what is watched. |
    | `SECTION_ITEM`, `SECTION_EMPTY` | Set both or neither: text that every listing in the section contains, and the text the page shows when there are none. A section showing neither is then refused as incomplete. |
-   | `HEARTBEAT_URL` | `https://` ping URL of an uptime check (e.g. a dead-man's switch). Runs started through the API or by hand ping it on success; scheduled runs send `/log`, which doesn't count as success; any run pings it with `/fail` if a job failed, an alert couldn't be delivered or the state wasn't saved. You're therefore alerted if the outside trigger stops, even while GitHub's own schedule keeps running. If the ping can't be delivered, the run fails. Without it, an undelivered alert or unsaved state fails the run instead. |
+   | `HEARTBEAT_URL` | `https://` ping URL of an uptime check (e.g. a dead-man's switch). Runs started through the API or by hand ping it on success; scheduled runs send `/log`, which doesn't count as success; any run pings it with `/fail` if a job failed, an alert couldn't be delivered or the state wasn't saved, and that ping's body says why (see [Failure reasons](#failure-reasons)). You're therefore alerted if the outside trigger stops, even while GitHub's own schedule keeps running. If the ping can't be delivered, the run fails. Without it, an undelivered alert or unsaved state fails the run instead. |
 
 2. Commit the public certificate as `handover.crt` (see
    [Hand-over key](#hand-over-key)).
@@ -235,8 +256,9 @@ message saying so.
 ## Tests
 
 `python -m unittest discover -s tests` runs the offline tests. They use
-made-up keywords, a fake Playwright and throwaway key pairs generated with
-`openssl`, so no browser, network access or secrets are needed.
+made-up keywords, a fake Playwright, throwaway key pairs generated with
+`openssl` and a local TLS server standing in for the heartbeat service, so
+no browser, network access or secrets are needed.
 The **Tests** workflow runs them on every change to `main` and on pull
 requests.
 

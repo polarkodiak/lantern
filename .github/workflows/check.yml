@@ -46,6 +46,10 @@ on:
         required: false
       PREVIOUS_STATE:
         required: false
+      FETCH_REASON:
+        required: false
+      STATE_REASON:
+        required: false
 
 permissions:
   contents: read
@@ -71,6 +75,7 @@ jobs:
           python-version: "3.13"
 
       - name: Check page
+        id: check
         if: success() && inputs.fetch_result == 'success' && inputs.state_result == 'success'
         env:
           WATCH_URL: ${{ secrets.WATCH_URL }}
@@ -93,6 +98,7 @@ jobs:
         run: python monitor.py check
 
       - name: Save state
+        id: save
         if: success() && inputs.fetch_result == 'success' && inputs.state_result == 'success'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -115,7 +121,7 @@ jobs:
           done
           # Shown publicly: a lost save says nothing about the page or alerts.
           echo "::warning::The new state couldn't be confirmed in the cache; the next run saves it again."
-          touch .state-not-saved
+          echo state_not_saved > .state-not-saved
 
       # Optional dead-man's switch. Any failure, including an alert that
       # couldn't be delivered or a state that wasn't saved, pings
@@ -123,23 +129,53 @@ jobs:
       # run. Success is pinged only by runs the outside service (or you)
       # started, so the uptime check also notices if that service stops,
       # even while GitHub's own schedule keeps running; GitHub's runs send
-      # /log, which records the run without counting as success. Every case
-      # makes one request of the same kind, with one overall time limit, and
-      # the step is padded to about 15 seconds, with or without a heartbeat,
-      # so its public duration shows neither which it was nor whether one
-      # is set. Unless the ping gets exactly HTTP 200, the run fails, so a
-      # private failure is never lost; a non-https HEARTBEAT_URL fails it
-      # too.
+      # /log, which records the run without counting as success. A /fail
+      # ping's body says why, as fixed categories that carry no data (see
+      # the README), which the heartbeat service keeps in its log. Every
+      # case makes one request of the same kind, with one overall time
+      # limit, and the step is padded to about 15 seconds, with or without a
+      # heartbeat, so its public duration shows neither which it was nor
+      # whether one is set. Unless the ping gets exactly HTTP 200, the run
+      # fails, so a private failure is never lost; a non-https HEARTBEAT_URL
+      # fails it too.
       - name: Report heartbeat
         if: always()
         env:
           HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
           EVENT: ${{ github.event_name }}
           OUTCOME: ${{ inputs.fetch_result == 'success' && inputs.state_result == 'success' && job.status || 'failure' }}
+          RUN_NUMBER: ${{ github.run_number }}
+          FETCH_RESULT: ${{ inputs.fetch_result }}
+          STATE_RESULT: ${{ inputs.state_result }}
+          FETCH_REASON: ${{ secrets.FETCH_REASON }}
+          STATE_REASON: ${{ secrets.STATE_REASON }}
+          CHECK: ${{ steps.check.outcome }}
+          SAVE: ${{ steps.save.outcome }}
         run: |
           started=$(date +%s)
           private_failure=false
           if [ -e .delivery-failed ] || [ -e .state-not-saved ]; then private_failure=true; fi
+          # The ping's body: empty when nothing failed; otherwise the run
+          # number (public anyway) and one line per failure, each a fixed
+          # category reduced to a safe character set and capped, never page
+          # text, an address or an error message.
+          body=.heartbeat-body
+          : > "$body"
+          add() { printf '%s' "$1" | head -c 200 | tr -c 'A-Za-z0-9_:;.' '_' >> "$body"; printf '\n' >> "$body"; }
+          [ "$FETCH_RESULT" = success ] || add "fetch:${FETCH_REASON:-$FETCH_RESULT}"
+          [ "$STATE_RESULT" = success ] || add "state:${STATE_REASON:-$STATE_RESULT}"
+          if [ "$CHECK" = failure ]; then
+            reason=$(head -c 300 .failure-reason 2> /dev/null | tr '\n' ';')
+            reason=${reason%;}
+            add "check:${reason:-failed}"
+          fi
+          [ "$SAVE" != failure ] || add state_save_failed
+          if [ -e .delivery-failed ]; then
+            while read -r line; do add "$line"; done < .delivery-failed
+          fi
+          [ ! -e .state-not-saved ] || add state_not_saved
+          if [ "$OUTCOME" != success ] && [ ! -s "$body" ]; then add job_failed; fi
+          [ ! -s "$body" ] || sed -i "1i run:$RUN_NUMBER" "$body"
           error=
           if [ -z "$HEARTBEAT_URL" ]; then
             # With no heartbeat to report it privately, such a failure fails
@@ -166,7 +202,8 @@ jobs:
             # padding the step normally takes about 15 seconds whatever the
             # outcome (the machine's own delays can still add a little).
             code=$(timeout 13 curl -s --proto =https --connect-timeout 4 -m 5 --retry 2 --retry-delay 1 \
-              --retry-max-time 12 -o /dev/null -w '%{http_code}' "$HEARTBEAT_URL" || true)
+              --retry-max-time 12 -o /dev/null -w '%{http_code}' -H 'Content-Type: text/plain' \
+              --data-binary @"$body" "$HEARTBEAT_URL" || true)
             [ "$code" = 200 ] || error="Couldn't reach HEARTBEAT_URL."
           fi
           # About 15 seconds with or without a heartbeat, valid or not, and
