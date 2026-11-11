@@ -51,15 +51,22 @@ Each check runs as three jobs on separate machines:
   doesn't print outputs (tested), so it isn't blocked.
 
 The check step prints the same line every time and is padded to 45 seconds,
-and the heartbeat step makes one request of the same kind in every case and
-is padded to 15 seconds.
+and the heartbeat step makes one ping, with the same kind of request and
+the same retries in every case, and is padded to about 15 seconds whether
+or not a heartbeat is set or valid.
 Deliveries run in parallel against a 35-second deadline, so the step normally
 takes 45 seconds whether no alert was due, an alert was sent or a delivery
 failed. A failed delivery or a state that couldn't be saved doesn't fail the
 public run; it's reported privately through `HEARTBEAT_URL`. Alerts describe
-the page as it is now: after a failed delivery, the next run alerts again if
-a keyword is still listed, but not if the listing is gone by then. A page
-that doesn't load properly is retried once before the check fails.
+the page as it is now: after a failed delivery, the next run alerts that
+channel again if a keyword is still listed, but not if the listing is gone by
+then; a channel that confirmed the alert isn't repeated. A service can accept
+a message and still answer too late, which counts as a failure and repeats
+the alert on that channel on the next run, and on every run it keeps
+happening. A channel added to the settings later, or pointed at a new
+topic, server or user key, is alerted on its first run if a keyword is
+listed then. A page that doesn't load properly is retried once before the
+check fails.
 Notification requests never follow redirects, their replies are size-capped
 and must confirm the message, and every address must be `https://`.
 
@@ -92,10 +99,15 @@ can't run code with the check job's secrets.
 
 ### State
 
-State is two salted HMAC-SHA256 values (of the page section and of the
-matches), which can't be reversed without
-`STATE_KEY`, plus the time and the run number it was saved at, both inside
-the HMACs. A state that is missing, unreadable, older than two hours, from
+State is salted HMAC-SHA256 values of the page section and of the matches,
+plus one per notification channel, of its destination, that verifies only if
+that destination is up to date with them (it confirmed the alert, or there
+was nothing to deliver); a channel that isn't, or isn't configured, gets
+random bytes of the same size instead, so the state doesn't show a failed
+delivery either. None of it
+can be reversed or forged without `STATE_KEY`, and the time and the run
+number it was saved at are inside every HMAC. A state that is missing,
+unreadable, older than two hours, from
 the future, or not saved by the previous run counts as a first run, which
 errs toward alerting: after a failed run or a lost save, an older state could
 otherwise hide an alert that has come back. After saving, the check job
@@ -142,6 +154,51 @@ new run instead.
    change when the workflow is re-enabled or its schedule edited. Re-enable
    it yourself to take ownership, then check your notification settings and
    that a notice actually arrives.
+
+4. Test an alert. A successful run shows that the settings were accepted
+   and the page was read, not that notifications arrive: a failed delivery
+   is kept out of the public result and reported only through
+   `HEARTBEAT_URL`. Add a word that is in the watched section right now to
+   `KEYWORDS`, start a run, and check that every configured channel gets a
+   notification. Then put `KEYWORDS` back exactly as it was. If one of the
+   original keywords is listed at that moment, putting it back causes one
+   more alert, because the matched keywords change.
+
+5. Set up the [outside trigger](#outside-trigger).
+
+## Outside trigger
+
+GitHub's own schedule runs late and often only about once an hour, so
+something outside GitHub (a cron job, a scheduled task on another host, an
+uptime service with a webhook) should start the workflow every 10 minutes
+through GitHub's API:
+
+```
+POST https://api.github.com/repos/OWNER/REPO/actions/workflows/monitor.yml/dispatches
+Authorization: Bearer TOKEN
+{"ref": "main"}
+```
+
+Give that service a fine-grained personal access token (**Settings →
+Developer settings → Personal access tokens → Fine-grained tokens**) with:
+
+- **Repository access:** only this repository.
+- **Permissions:** Actions: Read and write, and nothing else. Starting a
+  workflow needs no other permission.
+- **Expiration:** the shortest that suits you, at most a year. GitHub emails
+  you before it expires; set your own reminder too, since an expired token
+  stops the checks and only the heartbeat notices.
+
+Don't use a classic token: its `repo` and `workflow` scopes reach every
+repository the account can, not just this one. Whoever holds the
+fine-grained token can start, cancel, re-run and disable this repository's
+workflows, so it could stop the checks until you enable them again (the
+heartbeat notices); it can also read its run logs (public anyway in a public
+repository) and delete its Actions caches, which loses the state and causes
+at most an extra alert. It can't read the secrets or change the code. If the
+service is ever
+compromised, revoke the token on the same settings page. The token exists
+only in that service: never commit it, and never pass it to the workflow.
 
 ## Hand-over key
 
@@ -206,7 +263,11 @@ whether anything matched. If the repository is public:
 - On the same page, make fork pull request workflows need your approval for
   all outside contributors.
 - The `Keepalive` workflow commits a dated file once a month so GitHub
-  doesn't switch off the schedule after 60 days without a commit.
+  doesn't switch off the schedule after 60 days without a commit. Run it
+  once by hand (**Actions → Keepalive → Run workflow**) after setting the
+  repository rules, to confirm that it can push under them: a ruleset that
+  requires pull requests or signed commits would stop it, and GitHub only
+  emails about the failure.
 
 ## Recommended repository settings
 

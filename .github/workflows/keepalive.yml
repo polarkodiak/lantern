@@ -8,6 +8,9 @@ name: Keepalive
 on:
   schedule:
     - cron: "40 3 1 * *"
+  # By hand too, to confirm that it can commit and push under the
+  # repository's rules before the schedule depends on it.
+  workflow_dispatch:
 
 permissions:
   contents: read

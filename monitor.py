@@ -47,6 +47,9 @@ MAX_STATE_BYTES = 4096
 MAX_STATE_AGE = 2 * 60 * 60
 PAGE_FILE = ".page-section.bin"
 DELIVERY_FAILED_FILE = ".delivery-failed"
+# Every notification channel, configured or not: the state records each
+# one's delivery, so it always has the same fields.
+CHANNELS = ("ntfy", "pushover")
 HANDOVER_CERT = "handover.crt"
 # The encrypted hand-over reaches the check job as a base64 environment
 # variable, and Linux limits one variable to 128 KiB; a test keeps the
@@ -519,7 +522,14 @@ def load_check_config():
         raise ConfigError("HANDOVER_KEY is too long to be a private key")
     if bool(cfg["pushover_token"]) != bool(cfg["pushover_user"]):
         raise ConfigError("set both PUSHOVER_TOKEN and PUSHOVER_USER, or neither")
-    if not (cfg["ntfy_topic"] or cfg["pushover_token"]):
+    # Each configured channel and where it delivers to. A channel pointed
+    # somewhere new is alerted again about a listing that's already there.
+    cfg["channels"] = {}
+    if cfg["ntfy_topic"]:
+        cfg["channels"]["ntfy"] = cfg["ntfy_server"].rstrip("/") + "/" + cfg["ntfy_topic"]
+    if cfg["pushover_token"]:
+        cfg["channels"]["pushover"] = cfg["pushover_user"]
+    if not cfg["channels"]:
         raise ConfigError("no notification channel: set NTFY_TOPIC and/or PUSHOVER_TOKEN + PUSHOVER_USER")
 
     for value in [*raw_keywords, *keywords, state_key, cfg["url"], cfg["ntfy_topic"],
@@ -550,11 +560,12 @@ def parse_state(raw, now, run_number):
         state = json.loads(raw)
     except (ValueError, RecursionError):  # RecursionError: absurdly nested input
         return None
-    if not isinstance(state, dict) or set(state) != {"salt", "time", "run", "page", "matches"}:
+    if not isinstance(state, dict) or set(state) != {"salt", "time", "run", "page", "matches", *CHANNELS}:
         return None
     if not (isinstance(state["salt"], str) and re.fullmatch(r"[0-9a-f]{32}", state["salt"])):
         return None
-    if not all(isinstance(state[f], str) and re.fullmatch(r"[0-9a-f]{64}", state[f]) for f in ("page", "matches")):
+    if not all(isinstance(state[f], str) and re.fullmatch(r"[0-9a-f]{64}", state[f])
+               for f in ("page", "matches", *CHANNELS)):
         return None
     if type(state["time"]) is not int or not -300 <= now - state["time"] <= MAX_STATE_AGE:
         return None
@@ -592,7 +603,9 @@ def unchanged(key, state, label, value):
     return hmac.compare_digest(expected, state[label])
 
 
-def save_state(path, key, page, matches_text, now, run_number):
+def save_state(path, key, page, matches_text, up_to_date, now, run_number):
+    """up_to_date maps each channel that has this page and these matches to
+    the destination that has them."""
     # A fresh random salt every run means two states never look alike, even
     # when nothing changed, and the file is always the same size.
     salt = secrets.token_bytes(16)
@@ -604,6 +617,13 @@ def save_state(path, key, page, matches_text, now, run_number):
         "page": digest(key, salt, "page", saved_at, run_number, page),
         "matches": digest(key, salt, "matches", saved_at, run_number, matches_text),
     }
+    for name in CHANNELS:
+        # A channel whose destination has this page and these matches gets an
+        # HMAC of that destination; any other (a failed delivery, or not
+        # configured) gets random bytes of the same size, so the state
+        # doesn't show which.
+        state[name] = (digest(key, salt, name, saved_at, run_number, up_to_date[name]) if name in up_to_date
+                       else secrets.token_hex(32))
     with open(path, "w") as f:
         json.dump(state, f)
 
@@ -690,39 +710,27 @@ def send_pushover(cfg, message, deadline):
         raise AlertError("pushover rejected the message")
 
 
-def send_alerts(cfg, message, deadline):
-    """Send to every channel at once, each in its own thread, and wait no
-    later than deadline: a channel that hasn't confirmed by then counts as
-    failed, so a slow service can't stretch the check step."""
-    channels = []
-    if cfg["ntfy_topic"]:
-        channels.append(("ntfy", send_ntfy))
-    if cfg["pushover_token"]:
-        channels.append(("pushover", send_pushover))
-    results = {}
+def send_alerts(cfg, message, channels, deadline):
+    """Send to each named channel at once, each in its own thread, and wait
+    no later than deadline. Returns the channels that confirmed the message
+    by then; any other counts as failed, so a slow service can't stretch the
+    check step."""
+    senders = {"ntfy": send_ntfy, "pushover": send_pushover}
+    confirmed = set()
 
-    def attempt(name, send):
+    def attempt(name):
         try:
-            send(cfg, message, deadline)
-            results[name] = None
-        except Exception as exc:
-            results[name] = exc
+            senders[name](cfg, message, deadline)
+        except Exception:
+            return
+        confirmed.add(name)
 
-    threads = [threading.Thread(target=attempt, args=channel, daemon=True) for channel in channels]
+    threads = [threading.Thread(target=attempt, args=(name,), daemon=True) for name in channels]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(max(0.0, deadline - time.monotonic()))
-    failed = []
-    for name, _ in channels:
-        if name not in results:
-            failed.append(f"{name} (no reply in time)")
-        elif results[name] is not None:
-            exc = results[name]
-            status = getattr(exc, "code", None)
-            failed.append(f"{name} (HTTP {status})" if status else f"{name} ({type(exc).__name__})")
-    if failed:
-        raise AlertError("delivery failed: " + ", ".join(failed))
+    return set(confirmed)
 
 
 def run_check():
@@ -746,23 +754,27 @@ def run_check():
     key = cfg["state_key"]
     now = wall_clock()
     state = load_state(STATE_FILE, now, run_number)
-    changed = not (unchanged(key, state, "page", section)
-                   and unchanged(key, state, "matches", matches_text))
-    delivered = True
-    if matches and changed:
-        try:
-            send_alerts(cfg, build_message(cfg, section, matches), started + SEND_BUDGET)
-        except AlertError:
-            delivered = False
+    # A channel whose destination confirmed an alert for this same page and
+    # these same matches (or had nothing to deliver) is up to date and isn't
+    # alerted again. Every other configured channel is due one: the page or
+    # the matches changed, its last delivery failed, or it's new or points
+    # somewhere new.
+    same = unchanged(key, state, "page", section) and unchanged(key, state, "matches", matches_text)
+    channels = cfg["channels"]
+    up_to_date = {name: to for name, to in channels.items() if same and unchanged(key, state, name, to)}
+    due = [name for name in channels if name not in up_to_date]
+    if not matches:
+        up_to_date = dict(channels)
+    elif due:
+        for name in send_alerts(cfg, build_message(cfg, section, matches), due, started + SEND_BUDGET):
+            up_to_date[name] = channels[name]
 
-    if delivered:
-        save_state(STATE_FILE, key, section, matches_text, now, run_number)
-    else:
-        # A failed delivery must not show in the public run: save a state
-        # that can't match, so the next run alerts again if a keyword is
-        # still listed, and leave a marker for the heartbeat step to report
-        # the failure privately.
-        save_state(STATE_FILE, key, "", "", now, run_number)
+    save_state(STATE_FILE, key, section, matches_text, up_to_date, now, run_number)
+    if matches and set(due) - set(up_to_date):
+        # A failed delivery must not show in the public run: the state
+        # records which channels still haven't confirmed, so the next run
+        # alerts them again if a keyword is still listed, and a marker tells
+        # the heartbeat step to report the failure privately.
         open(DELIVERY_FAILED_FILE, "w").close()
     # Same output and the same duration whether or not anything matched, or
     # an alert was sent or failed, so neither the public run log nor the

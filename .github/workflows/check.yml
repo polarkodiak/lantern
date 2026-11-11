@@ -125,10 +125,11 @@ jobs:
       # even while GitHub's own schedule keeps running; GitHub's runs send
       # /log, which records the run without counting as success. Every case
       # makes one request of the same kind, with one overall time limit, and
-      # the step is padded to 15 seconds, so its public duration doesn't
-      # show which it was. Unless the ping gets exactly HTTP 200, the run
-      # fails, so a private failure is never lost; a non-https HEARTBEAT_URL
-      # fails it too.
+      # the step is padded to about 15 seconds, with or without a heartbeat,
+      # so its public duration shows neither which it was nor whether one
+      # is set. Unless the ping gets exactly HTTP 200, the run fails, so a
+      # private failure is never lost; a non-https HEARTBEAT_URL fails it
+      # too.
       - name: Report heartbeat
         if: always()
         env:
@@ -139,41 +140,41 @@ jobs:
           started=$(date +%s)
           private_failure=false
           if [ -e .delivery-failed ] || [ -e .state-not-saved ]; then private_failure=true; fi
+          error=
           if [ -z "$HEARTBEAT_URL" ]; then
             # With no heartbeat to report it privately, such a failure fails
             # the run instead, so it's never silent.
             if [ "$private_failure" = true ]; then
-              echo "An alert couldn't be delivered or the state wasn't saved. Set HEARTBEAT_URL to have this reported privately." >&2
-              exit 1
+              error="An alert couldn't be delivered or the state wasn't saved. Set HEARTBEAT_URL to have this reported privately."
             fi
-            exit 0
-          fi
-          case "$HEARTBEAT_URL" in
-            https://*) ;;
-            *) echo "HEARTBEAT_URL must be an https:// address" >&2; exit 1 ;;
-          esac
-          base="${HEARTBEAT_URL%%\?*}"
-          if [ "$OUTCOME" != success ] || [ "$private_failure" = true ]; then
-            ending=/fail
-          elif [ "$EVENT" != workflow_dispatch ]; then
-            ending=/log
+          elif [ "${HEARTBEAT_URL#https://}" = "$HEARTBEAT_URL" ]; then
+            error="HEARTBEAT_URL must be an https:// address"
           else
-            ending=
+            base="${HEARTBEAT_URL%%\?*}"
+            if [ "$OUTCOME" != success ] || [ "$private_failure" = true ]; then
+              ending=/fail
+            elif [ "$EVENT" != workflow_dispatch ]; then
+              ending=/log
+            else
+              ending=
+            fi
+            # Add the ending to the path, keeping any ?query after it.
+            [ -z "$ending" ] || HEARTBEAT_URL="${base%/}${ending}${HEARTBEAT_URL#"$base"}"
+            # Exactly HTTP 200 counts as delivered; a redirect is never
+            # followed (so the URL isn't passed on) and counts as a failure.
+            # One overall limit of 13 seconds covers every retry, so with the
+            # padding the step normally takes about 15 seconds whatever the
+            # outcome (the machine's own delays can still add a little).
+            code=$(timeout 13 curl -s --proto =https --connect-timeout 4 -m 5 --retry 2 --retry-delay 1 \
+              --retry-max-time 12 -o /dev/null -w '%{http_code}' "$HEARTBEAT_URL" || true)
+            [ "$code" = 200 ] || error="Couldn't reach HEARTBEAT_URL."
           fi
-          # Add the ending to the path, keeping any ?query after it.
-          [ -z "$ending" ] || HEARTBEAT_URL="${base%/}${ending}${HEARTBEAT_URL#"$base"}"
-          # Exactly HTTP 200 counts as delivered; a redirect is never followed
-          # (so the URL isn't passed on) and counts as a failure. One overall
-          # limit of 13 seconds covers every retry, so with the padding the
-          # step normally takes about 15 seconds whatever the outcome (the
-          # machine's own delays can still add a little).
-          code=$(timeout 13 curl -s --proto =https --connect-timeout 4 -m 5 --retry 2 --retry-delay 1 \
-            --retry-max-time 12 -o /dev/null -w '%{http_code}' "$HEARTBEAT_URL" || true)
-          status=0
-          [ "$code" = 200 ] || status=1
+          # About 15 seconds with or without a heartbeat, valid or not, and
+          # whatever it answered, so the step's public duration shows none
+          # of it.
           elapsed=$(( $(date +%s) - started ))
           [ "$elapsed" -ge 15 ] || sleep $(( 15 - elapsed ))
-          if [ "$status" != 0 ]; then
-            echo "::error::Couldn't reach HEARTBEAT_URL."
+          if [ -n "$error" ]; then
+            echo "::error::$error"
             exit 1
           fi
