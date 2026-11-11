@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -227,7 +228,8 @@ class AlertTests(unittest.TestCase):
         m = Monitor()
         sent, out = m(PAGE_MATCH, fail="ntfy")  # doesn't raise: the public run stays green
         self.assertEqual((sent, out), ([], "Check complete.\n"))
-        self.assertTrue(os.path.exists(m.path("delivery-failed")))  # the heartbeat reports it privately
+        with open(m.path("delivery-failed")) as f:
+            self.assertEqual(f.read(), "delivery_failed:ntfy\n")  # the heartbeat reports it privately
         sent, _ = m(PAGE_MATCH)
         self.assertEqual(len(sent), 1)  # the next run alerts again
         self.assertFalse(os.path.exists(m.path("delivery-failed")))  # and clears the old marker
@@ -248,7 +250,8 @@ class AlertTests(unittest.TestCase):
         m = Monitor(check_env=self.BOTH)
         sent, _ = m(PAGE_MATCH, fail="pushover")
         self.assertEqual([url for url, _, _ in sent], [self.NTFY])  # ntfy confirmed
-        self.assertTrue(os.path.exists(m.path("delivery-failed")))
+        with open(m.path("delivery-failed")) as f:
+            self.assertEqual(f.read(), "delivery_failed:pushover\n")
         sent, _ = m(PAGE_MATCH)
         self.assertEqual([url for url, _, _ in sent], [self.PUSHOVER])  # same page: pushover only
         self.assertFalse(os.path.exists(m.path("delivery-failed")))
@@ -814,6 +817,48 @@ class PageTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
 
 
+class FailureReasonTests(unittest.TestCase):
+    def test_categories_carry_no_data(self):
+        class Error(Exception):  # Playwright's error class is named Error
+            pass
+
+        class TimeoutError(Error):
+            pass
+
+        secret = "https://secret.invalid/private?x=1"
+        cases = [
+            (Error(f"Page.goto: net::ERR_CONNECTION_RESET at {secret}"), "net_error:ERR_CONNECTION_RESET"),
+            (TimeoutError(f"Page.goto: Timeout 60000ms exceeded.\nnavigating to {secret}"), "timeout"),
+            (Error(f"Execution context was destroyed, most likely because of a navigation. {secret}"), "page_navigated"),
+            (Error(f"Target page, context or browser has been closed {secret}"), "browser_closed"),
+            (Error(f"Protocol error: {secret}"), "browser_error"),
+            (ValueError(secret), "error:ValueError"),
+            (subprocess.TimeoutExpired(["openssl", secret], 60), "timeout"),
+            (monitor.PageError("page was redirected away from the watched site"),
+             "page_error:page_was_redirected_away_from_the_watched_site"),
+            (monitor.ConfigError("KEYWORDS is not set"), "config_error:keywords_is_not_set"),
+        ]
+        for exc, expected in cases:
+            category = monitor.failure_category(exc)
+            self.assertEqual(category, expected)
+            self.assertNotIn("secret", category)
+            self.assertTrue(re.fullmatch(r"[A-Za-z0-9_:]+", category), category)
+
+    def test_each_failed_attempt_is_recorded(self):
+        Monitor().fetch(PAGE_MATCH, goto_fails=1)  # the first load fails, the second succeeds
+        self.assertEqual(monitor.FETCH_ATTEMPT_FAILURES, ["net_error:ERR_FAILED"])
+        tmp = tempfile.mkdtemp()
+        with mock.patch.object(monitor, "REASON_FILE", os.path.join(tmp, "reason")):
+            monitor.record_failure(monitor.PageError("page hand-over could not be encrypted"))  # a later failure
+            with open(os.path.join(tmp, "reason")) as f:
+                self.assertEqual(f.read(), "attempt_1:net_error:ERR_FAILED\npage_error:page_hand_over_could_not_be_encrypted\n")
+            monitor.FETCH_ATTEMPT_FAILURES.append("timeout")
+            monitor.record_failure(TimeoutError("the second attempt's own error"))  # not repeated
+            with open(os.path.join(tmp, "reason")) as f:
+                self.assertEqual(f.read(), "attempt_1:net_error:ERR_FAILED\nattempt_2:timeout\n")
+        monitor.FETCH_ATTEMPT_FAILURES.clear()
+
+
 class ConfigTests(unittest.TestCase):
     def test_check_config_errors(self):
         cases = [
@@ -948,6 +993,108 @@ class WorkflowTests(unittest.TestCase):
                 shutil.rmtree(tmp)
 
 
+    def test_jobs_record_why_they_failed(self):
+        jobs = workflow_jobs()
+        for job, env, fallback in (("fetch", {"INSTALL": "success", "LOAD": "failure"}, "load_failed"),
+                                   ("state", {"RESTORE": "failure"}, "restore_failed")):
+            script = step_script(jobs[job], "Record failure")
+            for recorded, want in ((None, fallback),
+                                   ("attempt_1:net_error:ERR_X\nattempt_2:timeout\n", "attempt_1:net_error:ERR_X;attempt_2:timeout"),
+                                   ("odd text, with spaces & /slashes\n", "odd_text__with_spaces____slashes")):
+                tmp = tempfile.mkdtemp()
+                if recorded:
+                    with open(os.path.join(tmp, ".failure-reason"), "w") as f:
+                        f.write(recorded)
+                out = os.path.join(tmp, "out")
+                open(out, "w").close()
+                r = subprocess.run(["bash", "-e", "-c", script], cwd=tmp, capture_output=True, text=True,
+                                   env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": out, **env})
+                self.assertEqual(r.returncode, 0, r.stderr)
+                with open(out) as f:
+                    self.assertEqual(f.read(), f"reason={want}\n", (job, recorded))
+                shutil.rmtree(tmp)
+
+
+class _PingServer(http.server.BaseHTTPRequestHandler):
+    pings = []
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        _PingServer.pings.append((self.path, body.decode()))
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    do_GET = do_POST
+
+    def log_message(self, *args):
+        pass
+
+
+class HeartbeatTests(unittest.TestCase):
+    def test_heartbeat_reports_reasons_privately(self):
+        # The step's real script, run against a local TLS server with a
+        # throwaway certificate for 127.0.0.1 (curl trusts it through
+        # CURL_CA_BUNDLE), and a sleep that doesn't, so the padding takes no
+        # time.
+        key, cert = os.path.join(KEYS["dir"], "heartbeat.key"), os.path.join(KEYS["dir"], "heartbeat.crt")
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "2", "-nodes",
+                        "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
+                        "-keyout", key, "-out", cert], check=True, capture_output=True)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        server = http.server.HTTPServer(("127.0.0.1", 0), _PingServer)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        shim = tempfile.mkdtemp()
+        with open(os.path.join(shim, "sleep"), "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(shim, "sleep"), 0o755)
+        script = step_script(workflow_jobs("check.yml")["check"], "Report heartbeat")
+        url = f"https://127.0.0.1:{server.server_port}/abc?x=1"
+        base = {"PATH": shim + os.pathsep + os.environ["PATH"], "CURL_CA_BUNDLE": cert, "NO_PROXY": "*", "no_proxy": "*",
+                "HEARTBEAT_URL": url, "EVENT": "workflow_dispatch", "OUTCOME": "success", "RUN_NUMBER": "951",
+                "FETCH_RESULT": "success", "STATE_RESULT": "success", "FETCH_REASON": "", "STATE_REASON": "",
+                "CHECK": "success", "SAVE": "success"}
+
+        def run(env, files=()):
+            tmp = tempfile.mkdtemp()
+            for name, content in files:
+                with open(os.path.join(tmp, name), "w") as f:
+                    f.write(content)
+            _PingServer.pings.clear()
+            r = subprocess.run(["bash", "-e", "-c", script], cwd=tmp, capture_output=True, text=True, env={**base, **env})
+            shutil.rmtree(tmp)
+            return r.returncode, list(_PingServer.pings), r.stdout
+
+        try:
+            self.assertEqual(run({})[:2], (0, [("/abc?x=1", "")]))  # success: an empty body
+            self.assertEqual(run({"EVENT": "schedule"})[:2], (0, [("/abc/log?x=1", "")]))
+            code, pings, _ = run({"OUTCOME": "failure", "FETCH_RESULT": "failure",
+                                  "FETCH_REASON": "attempt_1:net_error:ERR_CONNECTION_RESET;attempt_2:timeout"})
+            self.assertEqual((code, pings), (0, [("/abc/fail?x=1", "run:951\nfetch:attempt_1:net_error:ERR_CONNECTION_RESET;attempt_2:timeout\n")]))
+            code, pings, _ = run({"OUTCOME": "failure", "FETCH_RESULT": "cancelled", "STATE_RESULT": "cancelled"})
+            self.assertEqual(pings, [("/abc/fail?x=1", "run:951\nfetch:cancelled\nstate:cancelled\n")])
+            code, pings, _ = run({"OUTCOME": "failure", "CHECK": "failure"}, [(".failure-reason", "config_error:keywords_is_not_set\n")])
+            self.assertEqual(pings, [("/abc/fail?x=1", "run:951\ncheck:config_error:keywords_is_not_set\n")])
+            code, pings, _ = run({"OUTCOME": "failure", "CHECK": "failure"})  # the script left no reason
+            self.assertEqual(pings, [("/abc/fail?x=1", "run:951\ncheck:failed\n")])
+            code, pings, _ = run({"OUTCOME": "failure"})  # failed outside its own steps, e.g. the checkout
+            self.assertEqual(pings, [("/abc/fail?x=1", "run:951\njob_failed\n")])
+            code, pings, _ = run({}, [(".delivery-failed", "delivery_failed:pushover\n")])  # private failures
+            self.assertEqual((code, pings), (0, [("/abc/fail?x=1", "run:951\ndelivery_failed:pushover\n")]))
+            code, pings, _ = run({"SAVE": "failure", "OUTCOME": "failure"}, [(".state-not-saved", "state_not_saved\n")])
+            self.assertEqual(pings, [("/abc/fail?x=1", "run:951\nstate_save_failed\nstate_not_saved\n")])
+            code, pings, _ = run({"OUTCOME": "failure", "CHECK": "failure"}, [(".failure-reason", "spaces & https://x.invalid/ here\n")])
+            self.assertNotIn("https://", pings[0][1])  # whatever was recorded is reduced to a safe character set
+            self.assertEqual(run({"HEARTBEAT_URL": "http://127.0.0.1:9/x"})[:2], (1, []))  # not https: refused, no request
+            self.assertEqual(run({"HEARTBEAT_URL": ""}, [(".delivery-failed", "delivery_failed:ntfy\n")])[:2], (1, []))
+            self.assertEqual(run({"HEARTBEAT_URL": ""})[:2], (0, []))  # no heartbeat, nothing failed
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 class OpenerTests(unittest.TestCase):
     def test_alerts_never_go_through_a_proxy(self):
         # Proxies are read from the environment when the opener is built.
@@ -1013,8 +1160,14 @@ class CommandLineTests(unittest.TestCase):
         shutil.copy(KEYS["cert"], os.path.join(tmp, "handover.crt"))
         r = self.run_cli(["fetch"], dict(PAGE_ENV, FAKE_PAGE_TEXT=PAGE_MATCH, FAKE_GOTO_FAIL="1"), tmp)
         self.assertEqual((r.returncode, r.stdout, r.stderr.strip()), (1, "", "Check failed: RuntimeError"))
+        with open(os.path.join(tmp, monitor.REASON_FILE)) as f:
+            reasons = f.read()  # for the heartbeat: the error's fixed name per attempt, never its text
+        self.assertEqual(reasons, "attempt_1:net_error:ERR_FAILED\nattempt_2:net_error:ERR_FAILED\n")
+        self.assertNotIn("example", reasons)
         r = self.run_cli(["check"], {}, tmp)
         self.assertEqual((r.returncode, r.stderr.strip()), (1, "ConfigError: KEYWORDS is not set"))
+        with open(os.path.join(tmp, monitor.REASON_FILE)) as f:
+            self.assertEqual(f.read(), "config_error:keywords_is_not_set\n")
         r = self.run_cli([], {}, tmp)
         self.assertEqual((r.returncode, r.stderr.strip()), (1, "ConfigError: usage: monitor.py fetch|check"))
 

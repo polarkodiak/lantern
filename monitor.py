@@ -19,7 +19,9 @@ Everything that would identify what is being watched (the page, the
 keywords, the notification channels) comes from environment variables that
 the workflow fills from repository secrets. The script never prints any of
 it, and the state it keeps between runs is salted HMACs that reveal nothing
-without STATE_KEY.
+without STATE_KEY. When a command fails, it leaves a fixed category of the
+reason (never the error's text) in REASON_FILE, for the workflow's heartbeat
+step to report privately.
 """
 
 import base64
@@ -47,6 +49,7 @@ MAX_STATE_BYTES = 4096
 MAX_STATE_AGE = 2 * 60 * 60
 PAGE_FILE = ".page-section.bin"
 DELIVERY_FAILED_FILE = ".delivery-failed"
+REASON_FILE = ".failure-reason"
 # Every notification channel, configured or not: the state records each
 # one's delivery, so it always has the same fields.
 CHANNELS = ("ntfy", "pushover")
@@ -237,9 +240,15 @@ def load_page(page, url, start, end, item="", empty=""):
     return section
 
 
+# Why each failed attempt to load the page failed, as fixed categories, for
+# the failure report. Cleared when a fetch starts.
+FETCH_ATTEMPT_FAILURES = []
+
+
 def fetch_page_section(url, start, end, item="", empty=""):
     from playwright.sync_api import sync_playwright
 
+    FETCH_ATTEMPT_FAILURES.clear()
     with sync_playwright() as p:
         # Google Chrome is preinstalled on GitHub's Ubuntu runners, so this
         # skips a ~150 MB browser download on every run. Playwright turns
@@ -251,9 +260,10 @@ def fetch_page_section(url, start, end, item="", empty=""):
                 page = browser.new_page()
                 try:
                     return load_page(page, url, start, end, item, empty)
-                except Exception:
+                except Exception as exc:
                     # A slow or half-loaded page is usually a passing hiccup
                     # on the site, so try once more before failing the check.
+                    FETCH_ATTEMPT_FAILURES.append(failure_category(exc))
                     if attempt == FETCH_ATTEMPTS:
                         raise
                     time.sleep(RETRY_PAUSE)
@@ -770,12 +780,14 @@ def run_check():
             up_to_date[name] = channels[name]
 
     save_state(STATE_FILE, key, section, matches_text, up_to_date, now, run_number)
-    if matches and set(due) - set(up_to_date):
+    failed = [name for name in due if name not in up_to_date] if matches else []
+    if failed:
         # A failed delivery must not show in the public run: the state
         # records which channels still haven't confirmed, so the next run
-        # alerts them again if a keyword is still listed, and a marker tells
-        # the heartbeat step to report the failure privately.
-        open(DELIVERY_FAILED_FILE, "w").close()
+        # alerts them again if a keyword is still listed, and a marker names
+        # them for the heartbeat step to report privately.
+        with open(DELIVERY_FAILED_FILE, "w") as f:
+            f.write("".join(f"delivery_failed:{name}\n" for name in failed))
     # Same output and the same duration whether or not anything matched, or
     # an alert was sent or failed, so neither the public run log nor the
     # public step timings show any of it.
@@ -783,10 +795,57 @@ def run_check():
     print("Check complete.")
 
 
+# --- failure reasons: fixed categories for the private heartbeat report ----
+
+def slug(text):
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")[:80]
+
+
+def failure_category(exc):
+    """Why something failed, as a fixed label that carries no data: the kind
+    of browser or network error, never its message, which can name the page.
+    The workflow's heartbeat step reports it privately."""
+    if isinstance(exc, (ConfigError, PageError, AlertError)):
+        # Fixed messages that the public log prints anyway.
+        return f"{type(exc).__name__.replace('Error', '').lower()}_error:{slug(str(exc))}"
+    text = str(exc)
+    name = type(exc).__name__
+    net = re.search(r"net::(ERR_[A-Z0-9_]+)", text)  # Chromium's fixed error names
+    if net:
+        return f"net_error:{net.group(1)}"
+    if name == "TimeoutError" or isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+        return "timeout"
+    lowered = text.lower()
+    if "closed" in lowered or "crashed" in lowered:
+        return "browser_closed"
+    if "execution context was destroyed" in lowered or "detached" in lowered or "navigation" in lowered:
+        return "page_navigated"
+    if name == "Error":  # Playwright's own error class
+        return "browser_error"
+    return f"error:{name}"
+
+
+def record_failure(exc):
+    """Leave the reason for this command's failure in REASON_FILE: one line
+    per failed attempt to load the page, then the final failure if it was
+    something else."""
+    lines = [f"attempt_{i}:{category}" for i, category in enumerate(FETCH_ATTEMPT_FAILURES, 1)]
+    final = failure_category(exc)
+    if not lines or lines[-1].split(":", 1)[1] != final:
+        lines.append(final)
+    try:
+        with open(REASON_FILE, "w") as f:
+            f.write("".join(line + "\n" for line in lines))
+    except OSError:
+        pass
+
+
 COMMANDS = {"fetch": run_fetch, "check": run_check}
 
 
 def main(argv):
+    if os.path.exists(REASON_FILE):
+        os.remove(REASON_FILE)  # only this command's failure counts
     command = argv[1] if len(argv) == 2 else ""
     if command not in COMMANDS:
         raise ConfigError("usage: monitor.py fetch|check")
@@ -797,9 +856,11 @@ if __name__ == "__main__":
     try:
         main(sys.argv)
     except (ConfigError, PageError, AlertError) as exc:
+        record_failure(exc)
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         sys.exit(1)
     except Exception as exc:
+        record_failure(exc)
         # Type only: library messages can include URLs or page text.
         print(f"Check failed: {type(exc).__name__}", file=sys.stderr)
         sys.exit(1)
