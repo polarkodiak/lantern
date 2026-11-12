@@ -53,8 +53,8 @@ Each check runs as three jobs on separate machines:
 
 The check step prints the same line every time and is padded to 45 seconds,
 and the heartbeat step makes one ping, with the same kind of request and
-the same retries in every case, and is padded to about 15 seconds whether
-or not a heartbeat is set or valid.
+the same retry rules in every case, and is padded to about 15 seconds
+whether or not a heartbeat is set or valid.
 Deliveries run in parallel against a 35-second deadline, so the step normally
 takes 45 seconds whether no alert was due, an alert was sent or a delivery
 failed. A failed delivery or a state that couldn't be saved doesn't fail the
