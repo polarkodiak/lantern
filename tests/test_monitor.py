@@ -100,7 +100,7 @@ class Monitor:
              mock.patch.object(monitor, "HANDOVER_CERT", cert or KEYS["cert"]), \
              mock.patch.object(monitor, "SECTION_TIMEOUT", 0), \
              mock.patch.object(monitor, "STABLE_TIMEOUT", 0), \
-             mock.patch.object(monitor, "RETRY_PAUSE", 0), \
+             mock.patch.object(monitor, "RETRY_PAUSES", (0,) * len(monitor.RETRY_PAUSES)), \
              redirect_stdout(out):
             monitor.run_fetch()
         return out.getvalue()
@@ -712,15 +712,20 @@ class PageTests(unittest.TestCase):
             m.fetch("Loading...")
         self.assertEqual(before, m.state())
 
-    def test_one_failed_load_is_retried(self):
-        m = Monitor()
-        m.fetch(PAGE_MATCH, goto_fails=1)
-        sent, _ = m.check()
-        self.assertEqual(len(sent), 1)
+    def test_failed_loads_are_retried_twice(self):
+        self.assertEqual(monitor.RETRY_PAUSES, (5, 30))  # a quick retry, then one that outlasts a DNS blip
+        for fails in (1, 2):
+            m = Monitor()
+            m.fetch(PAGE_MATCH, goto_fails=fails)
+            sent, _ = m.check()
+            self.assertEqual(len(sent), 1, fails)
 
-    def test_two_failed_loads_fail_the_check(self):
-        with self.assertRaises(RuntimeError):
-            Monitor().fetch(PAGE_MATCH, goto_fails=2)
+    def test_three_failed_loads_fail_the_check(self):
+        with mock.patch.object(monitor.time, "sleep") as sleep:
+            with self.assertRaises(RuntimeError):
+                Monitor().fetch(PAGE_MATCH, goto_fails=3)
+        self.assertEqual(sleep.call_count, 2)  # a pause before each retry, none after the last attempt
+        self.assertEqual(monitor.FETCH_ATTEMPT_FAILURES, ["net_error:ERR_FAILED"] * 3)
 
     def test_section_must_stop_changing(self):
         with self.assertRaises(monitor.PageError) as ctx:
@@ -1158,12 +1163,14 @@ class CommandLineTests(unittest.TestCase):
     def test_errors_do_not_leak(self):
         tmp = tempfile.mkdtemp()
         shutil.copy(KEYS["cert"], os.path.join(tmp, "handover.crt"))
-        r = self.run_cli(["fetch"], dict(PAGE_ENV, FAKE_PAGE_TEXT=PAGE_MATCH, FAKE_GOTO_FAIL="1"), tmp)
+        # The browser fails to start, so no attempt is made and no retry pause
+        # is waited through; attempts and their pauses are tested in-process.
+        r = self.run_cli(["fetch"], dict(PAGE_ENV, FAKE_PAGE_TEXT=PAGE_MATCH, FAKE_LAUNCH_FAIL="1"), tmp)
         self.assertEqual((r.returncode, r.stdout, r.stderr.strip()), (1, "", "Check failed: RuntimeError"))
         with open(os.path.join(tmp, monitor.REASON_FILE)) as f:
-            reasons = f.read()  # for the heartbeat: the error's fixed name per attempt, never its text
-        self.assertEqual(reasons, "attempt_1:net_error:ERR_FAILED\nattempt_2:net_error:ERR_FAILED\n")
-        self.assertNotIn("example", reasons)
+            reasons = f.read()  # for the heartbeat: the error's fixed name, never its text
+        self.assertEqual(reasons, "error:RuntimeError\n")
+        self.assertNotIn("chrome", reasons)
         r = self.run_cli(["check"], {}, tmp)
         self.assertEqual((r.returncode, r.stderr.strip()), (1, "ConfigError: KEYWORDS is not set"))
         with open(os.path.join(tmp, monitor.REASON_FILE)) as f:

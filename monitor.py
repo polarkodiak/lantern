@@ -68,8 +68,11 @@ OPENSSL_MEMORY = 512 * 1024 * 1024
 SECTION_TIMEOUT = 45
 STABLE_PAUSE_MS = 2000
 STABLE_TIMEOUT = 30
-FETCH_ATTEMPTS = 2
-RETRY_PAUSE = 5
+# Pauses between attempts to load the page: a quick retry for a half-loaded
+# page, then a longer one so a DNS or network blip of about a minute, the
+# usual shape of a runner's resolver hiccup, doesn't fail the check.
+RETRY_PAUSES = (5, 30)
+FETCH_ATTEMPTS = len(RETRY_PAUSES) + 1
 HTTP_TIMEOUT = 15
 MAX_RESPONSE_BYTES = 64 * 1024
 # All deliveries must finish within SEND_BUDGET seconds of the check starting,
@@ -261,12 +264,13 @@ def fetch_page_section(url, start, end, item="", empty=""):
                 try:
                     return load_page(page, url, start, end, item, empty)
                 except Exception as exc:
-                    # A slow or half-loaded page is usually a passing hiccup
-                    # on the site, so try once more before failing the check.
+                    # A slow or half-loaded page, or a name that briefly won't
+                    # resolve, is usually a passing hiccup, so try again
+                    # before failing the check.
                     FETCH_ATTEMPT_FAILURES.append(failure_category(exc))
                     if attempt == FETCH_ATTEMPTS:
                         raise
-                    time.sleep(RETRY_PAUSE)
+                    time.sleep(RETRY_PAUSES[attempt - 1])
                 finally:
                     page.close()
         finally:

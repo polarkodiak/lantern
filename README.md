@@ -66,8 +66,9 @@ a message and still answer too late, which counts as a failure and repeats
 the alert on that channel on the next run, and on every run it keeps
 happening. A channel added to the settings later, or pointed at a new
 topic, server or user key, is alerted on its first run if a keyword is
-listed then. A page that doesn't load properly is retried once before the
-check fails.
+listed then. A page that doesn't load properly is tried three times, after
+pauses of 5 and 30 seconds, so a network or DNS blip of about a minute
+doesn't fail the check; a longer one does.
 Notification requests never follow redirects, their replies are size-capped
 and must confirm the message, and every address must be `https://`.
 
