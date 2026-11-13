@@ -1,7 +1,7 @@
 """Minimal stand-in for playwright.sync_api, so the tests run without a
 browser. The page text is the synthetic text in FAKE_PAGE_TEXT.
 FAKE_GOTO_FAIL makes every page load fail; FAKE_GOTO_FAILS=N fails only the
-first N loads; FAKE_FINAL_URL sets where the page ends up; FAKE_STATUS sets
+first N loads; FAKE_LAUNCH_FAIL makes the browser fail to start; FAKE_FINAL_URL sets where the page ends up; FAKE_STATUS sets
 the HTTP status (default 200); FAKE_NEVER_IDLE makes the page keep loading;
 FAKE_CHANGING makes the watched section different on every read;
 FAKE_DATA_FAIL makes a background data request fail: "status" (an HTTP
@@ -113,6 +113,8 @@ class _Chromium:
     def launch(self, **kwargs):
         assert kwargs.get("channel") == "chrome"
         assert kwargs.get("chromium_sandbox") is True, "Chrome's sandbox must be on"
+        if os.environ.get("FAKE_LAUNCH_FAIL"):
+            raise RuntimeError("Executable doesn't exist at /opt/chrome/chrome")
         return _Browser()
 
 
